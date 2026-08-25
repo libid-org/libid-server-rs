@@ -1,10 +1,9 @@
 [package]
 name = "libid-server-rs"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
-# Inherited from libid-rs, and it is not arbitrary: the `mpz` MPC dependency
-# (via tlsn) uses `cfg_select!`, unstable before 1.94.
-rust-version = "1.94.1"
+# Inherited from libid-rs: TLSNotary alpha.15's MPZ graph requires Rust 1.95.
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/libid-org/libid-server-rs"
 description = "libID server: OAuth handle-claim flow producing bind-ready MPC-TLS proofs. The UI submits the bind on-chain itself."
@@ -22,13 +21,13 @@ publish = false
 # libid-signer is deliberately absent, and with it the AWS SDK: this service
 # holds no signing key. Nothing else here needs it — the notary digest is
 # only ever verified, never signed.
-libid-attestations = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
-libid-transcript = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
+libid-attestations = { git = "https://github.com/libid-org/libid-rs", rev = "ad508b2ff5ffeacdfcbf3f4ae1876a43c379a6db" }
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "ad508b2ff5ffeacdfcbf3f4ae1876a43c379a6db" }
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "ad508b2ff5ffeacdfcbf3f4ae1876a43c379a6db" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "ad508b2ff5ffeacdfcbf3f4ae1876a43c379a6db" }
 # Upstream TLSNotary, the same pin libid-rs uses. Needed directly for the
 # attestation/presentation types (`Attestation`, `CryptoProvider`, `Secrets`).
-tlsn = { git = "https://github.com/tlsnotary/tlsn", rev = "040c6881f3ec65ea042de134a0586b23cf382443" }
+tlsn = { git = "https://github.com/tlsnotary/tlsn", tag = "v0.1.0-alpha.15" }
 
 # ── proof ABI types ─────────────────────────────────────────────────────
 alloy-primitives = { version = "1", features = ["serde"] }
