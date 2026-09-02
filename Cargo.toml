@@ -36,7 +36,6 @@ libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9
 
 # ── HTTP server / client ────────────────────────────────────────────────
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
 
 # ── everything else ─────────────────────────────────────────────────────
 base64 = "0.22"

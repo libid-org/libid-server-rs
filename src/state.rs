@@ -22,9 +22,6 @@ pub struct AppState {
     /// route compares a request's `Origin` against it, so a value that differs
     /// from what browsers actually send refuses every legitimate call.
     pub server_origin: String,
-    /// The application origins allowed to read the public ceremony
-    /// configuration.
-    pub allowed_app_origins: Vec<String>,
     /// The notary this service opens its token session against, as the
     /// `host:port` a TCP connect takes.
     ///
@@ -35,8 +32,6 @@ pub struct AppState {
     /// GitHub's confidential client. The secret never leaves this process and
     /// is never revealed in a notarized transcript.
     pub github_oauth: OAuthCredentials,
-    /// Where the Google relay forwards to, when one is configured.
-    pub app_url: Option<String>,
     /// How many token exchanges may run at once.
     ///
     /// This is the only thing standing between an anonymous caller and as many

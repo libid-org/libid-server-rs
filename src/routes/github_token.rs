@@ -589,14 +589,12 @@ mod tests {
     fn state(client_secret: &str) -> AppState {
         AppState {
             server_origin: "http://127.0.0.1:8722".into(),
-            allowed_app_origins: Vec::new(),
             notary_addr: "127.0.0.1:7047".into(),
             github_oauth: crate::oauth::OAuthCredentials {
                 client_id: "Iv1.0123456789abcdef".into(),
                 client_secret: client_secret.into(),
                 redirect_uri: "http://127.0.0.1:8722/api/v1/ceremony/callback".into(),
             },
-            app_url: None,
             exchange_permits: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_EXCHANGES,
             )),

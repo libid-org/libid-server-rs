@@ -40,17 +40,6 @@ pub struct Config {
     #[arg(long, env = "BASE_URL", default_value = "http://127.0.0.1:8722")]
     pub base_url: String,
 
-    /// Public URL of the web app. The Gmail fragment-relay callback bounces
-    /// the popup to `{APP_URL}/auth/gmail/callback`. Empty disables the
-    /// relay (it responds 500 with a pointed message).
-    #[arg(long, env = "APP_URL", default_value = "")]
-    pub app_url: String,
-
-    /// Comma-separated CORS allow-list. Supports `*.suffix` and `prefix*`
-    /// wildcards.
-    #[arg(long, env = "ALLOWED_ORIGINS", default_value = "http://localhost:3000")]
-    pub allowed_origins: String,
-
     /// URL of the notary server (TCP), e.g. `tcp://notary.example:7047`.
     #[arg(long, env = "NOTARY_URL", default_value = "tcp://127.0.0.1:7047")]
     pub notary_url: Url,
@@ -62,15 +51,4 @@ pub struct Config {
     /// GitHub OAuth App client secret.
     #[arg(long, env = "GH_OAUTH_CLIENT_SECRET")]
     pub gh_oauth_client_secret: String,
-}
-
-impl Config {
-    /// The comma-separated origins as a vector of patterns.
-    pub fn allowed_origin_patterns(&self) -> Vec<String> {
-        self.allowed_origins
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    }
 }

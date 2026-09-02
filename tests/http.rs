@@ -19,24 +19,22 @@ use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
 /// The state carries no signing identity: the service holds no key.
-fn state_with(app_url: Option<&str>, permits: usize) -> Arc<AppState> {
+fn state_with(permits: usize) -> Arc<AppState> {
     Arc::new(AppState {
         server_origin: "http://127.0.0.1:8722".into(),
-        allowed_app_origins: vec!["http://localhost:3000".into()],
         notary_addr: "127.0.0.1:7047".into(),
         github_oauth: libid_server_rs::oauth::OAuthCredentials {
             client_id: "test-client-id".into(),
             client_secret: "test-client-secret".into(),
             redirect_uri: "http://127.0.0.1:8722/api/v1/ceremony/callback".into(),
         },
-        app_url: app_url.map(str::to_string),
         exchange_permits: Arc::new(Semaphore::new(permits)),
     })
 }
 
 /// A state whose exchange ceiling is the default.
-fn test_state(app_url: Option<&str>) -> Arc<AppState> {
-    state_with(app_url, routes::github_token::MAX_CONCURRENT_EXCHANGES)
+fn test_state() -> Arc<AppState> {
+    state_with(routes::github_token::MAX_CONCURRENT_EXCHANGES)
 }
 
 fn app(state: Arc<AppState>) -> axum::Router {
@@ -45,53 +43,13 @@ fn app(state: Arc<AppState>) -> axum::Router {
 
 #[tokio::test]
 async fn health_is_ok() {
-    let resp = app(test_state(None))
+    let resp = app(test_state())
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&bytes[..], b"OK");
-}
-
-#[tokio::test]
-async fn gmail_relay_serves_csp_locked_forwarder() {
-    let state = test_state(Some("https://wallet.example"));
-    let resp = app(state)
-        .oneshot(
-            Request::get("/auth/gmail/callback")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(
-        resp.headers()["content-security-policy"],
-        "default-src 'none'; script-src 'unsafe-inline'"
-    );
-    assert_eq!(resp.headers()["cache-control"], "no-store");
-    assert_eq!(resp.headers()["referrer-policy"], "no-referrer");
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let html = std::str::from_utf8(&bytes).unwrap();
-    // APP_URL substituted, path forced, fragment forwarded.
-    assert!(html.contains("\"https://wallet.example/auth/gmail/callback\""));
-    assert!(html.contains("location.replace"));
-    assert!(html.contains("location.hash"));
-}
-
-#[tokio::test]
-async fn gmail_relay_requires_app_url() {
-    let state = test_state(None);
-    let resp = app(state)
-        .oneshot(
-            Request::get("/auth/gmail/callback")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 // ─── the GitHub token route ──────────────────────────────────────────────────
@@ -110,7 +68,7 @@ async fn post_token(origin: Option<&str>, body: String) -> axum::response::Respo
     if let Some(origin) = origin {
         req = req.header("origin", origin);
     }
-    app(test_state(None))
+    app(test_state())
         .oneshot(req.body(Body::from(body)).unwrap())
         .await
         .unwrap()
@@ -184,7 +142,7 @@ async fn github_token_sheds_when_no_permit_is_free() {
         .header("origin", ORIGIN)
         .body(Body::from(valid_body()))
         .unwrap();
-    let resp = app(state_with(None, 0)).oneshot(req).await.unwrap();
+    let resp = app(state_with(0)).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }

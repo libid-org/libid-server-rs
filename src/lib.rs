@@ -51,9 +51,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             // refuses the exchange.
             redirect_uri: format!("{server_origin}/api/v1/ceremony/callback"),
         },
-        allowed_app_origins: cfg.allowed_origin_patterns(),
         notary_addr: notary_addr(&cfg.notary_url)?,
-        app_url: (!cfg.app_url.is_empty()).then(|| cfg.app_url.clone()),
         exchange_permits: Arc::new(Semaphore::new(
             routes::github_token::MAX_CONCURRENT_EXCHANGES,
         )),

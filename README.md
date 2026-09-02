@@ -6,7 +6,7 @@ A platform ceremony runs in the browser: it opens the provider, consumes the
 redirect against its own live state, notarizes what it needs, and builds the
 proof. The one thing a browser cannot hold is a confidential client secret,
 which is why GitHub's token exchange happens here and why this service exists
-at all. Google and X need no confidential route from it.
+at all. Google and X need no confidential route from it, and get none.
 
 It keeps no ceremony state, no session, no challenge and no result. A timeout,
 a duplicate request, a restart or a lost response leave no record here, and
@@ -55,7 +55,6 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. |
-| `GET` | `/auth/gmail/callback` | Static, CSP-locked fragment relay for the Google OIDC flow: forwards `location.hash` — the id_token, which never reaches any server — to `{APP_URL}/auth/gmail/callback`. Requires `APP_URL`. |
 | `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from this server's own origin. |
 
 ### `POST /api/v1/ceremony/github-token`
@@ -107,8 +106,6 @@ All settings come from environment variables (or the matching `--flag`).
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `PORT` | `8722` | Bind port. |
 | `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server. The GitHub OAuth App's callback URL must be exactly `{BASE_URL}/api/v1/ceremony/callback`. |
-| `APP_URL` | *(empty)* | Public URL of the web app; target of the Gmail fragment relay. Https required except for localhost. Empty disables the relay. |
-| `ALLOWED_ORIGINS` | `http://localhost:3000` | Comma-separated CORS allow-list. `*.suffix` and `prefix*` wildcards supported. |
 | `NOTARY_URL` | `tcp://127.0.0.1:7047` | The notary server's TCP endpoint. |
 | `GH_OAUTH_CLIENT_ID` | *(required)* | GitHub OAuth App client id (a plain read-only OAuth App; no GitHub App needed). |
 | `GH_OAUTH_CLIENT_SECRET` | *(required)* | GitHub OAuth App client secret. |
@@ -119,21 +116,25 @@ is gone — a deployment that still sets it is not broken, but the value is
 ignored, so drop it from your secrets. The only secret this server needs is
 `GH_OAUTH_CLIENT_SECRET`.
 
-### Note on Google binds
+### On Google
 
-This server does not run a JWKS rotator. Until a rotator runs somewhere and
-publishes Google's current signing moduli on-chain, Google/Gmail binds
-revert with `UntrustedModulus`. GitHub and X are unaffected. The
-`/auth/gmail/callback` relay is served regardless, so the browser side of
-the Google flow works the moment a rotator exists.
+Nothing here serves the Google ceremony. It gets no confidential route by
+design — its identity evidence is a signed ID Token the browser reads out of
+the redirect fragment, so there is no secret to hold and nothing to exchange.
+The fragment relay this server used to serve is gone: the redirect document
+that replaces it belongs to the ceremony's own redirect runtime, which handles
+every platform, clears the fragment, and hands the response to the code in the
+popup rather than bouncing it through a URL.
+
+Google binds also revert with `UntrustedModulus` until a JWKS rotator runs
+somewhere and publishes Google's current signing moduli on chain. This server
+is not that rotator either.
 
 ## Running with Docker
 
 ```sh
 docker run --rm -p 8722:8722 \
   -e BASE_URL=https://handles.example.com \
-  -e APP_URL=https://app.example.com \
-  -e ALLOWED_ORIGINS=https://app.example.com \
   -e NOTARY_URL=tcp://notary.example.com:7047 \
   -e GH_OAUTH_CLIENT_ID=... \
   -e GH_OAUTH_CLIENT_SECRET=... \
