@@ -19,15 +19,6 @@ pub enum Error {
         detail: String,
     },
 
-    /// A cryptographic operation failed.
-    #[error("{op}: {detail}")]
-    CryptoFailed {
-        /// The operation that failed.
-        op: String,
-        /// Human-readable failure detail.
-        detail: String,
-    },
-
     /// Connecting to the notary failed.
     #[error("failed to connect to notary at {addr}: {detail}")]
     NotaryConnect {
@@ -51,10 +42,6 @@ pub enum Error {
         detail: String,
     },
 
-    /// The recomputed Merkle root did not match the proof's transcript root.
-    #[error("transcript root mismatch")]
-    TranscriptRootMismatch,
-
     /// Socket I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -70,10 +57,6 @@ pub enum Error {
     /// Transcript parsing or the notary wire protocol failed.
     #[error(transparent)]
     Transcript(#[from] libid_transcript::Error),
-
-    /// A libid-crypto primitive failed.
-    #[error(transparent)]
-    Crypto(#[from] libid_crypto::Error),
     // No signing variant: this service holds no key and signs nothing.
 }
 

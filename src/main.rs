@@ -19,10 +19,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cfg = Config::parse();
-    let allowed_origins = cfg.allowed_origin_patterns();
     let addr = format!("{}:{}", cfg.host, cfg.port);
 
     let state = build_state(&cfg)?;
+    // Read off the state rather than recomputed from the config: two readings
+    // of one setting can disagree, and nothing would say so.
+    let allowed_origins = state.allowed_app_origins.clone();
     let app = routes::build_router()
         .with_state(state)
         .layer(routes::cors_layer(allowed_origins));

@@ -10,6 +10,10 @@
 //! It holds no signing key either. The notary signs; this service only carries
 //! what the notary said.
 
+use std::sync::Arc;
+
+use tokio::sync::Semaphore;
+
 use crate::oauth::OAuthCredentials;
 
 /// Configuration the request handlers read.
@@ -33,4 +37,11 @@ pub struct AppState {
     pub github_oauth: OAuthCredentials,
     /// Where the Google relay forwards to, when one is configured.
     pub app_url: Option<String>,
+    /// How many token exchanges may run at once.
+    ///
+    /// This is the only thing standing between an anonymous caller and as many
+    /// MPC-TLS sessions as it cares to start — the origin check is not caller
+    /// authentication and says so. A request that finds no permit is shed,
+    /// not queued.
+    pub exchange_permits: Arc<Semaphore>,
 }

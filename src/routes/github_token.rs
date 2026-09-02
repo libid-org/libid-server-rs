@@ -87,6 +87,24 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// until the process restarts.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long the notary may take to hand back the record for a session it has
+/// already run.
+///
+/// Its own budget, because the session's is spent by this point and all that
+/// remains is a write. Without one, a notary that completes a session and then
+/// stalls -- or writes half a length prefix and stops -- parks this request
+/// until the process restarts, which is the failure the budget above exists to
+/// rule out.
+const RECORD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many exchanges may be in flight at once.
+///
+/// Each one is a full MPC-TLS session and an outbound request that spends the
+/// client secret. The origin check is not caller authentication -- it says so
+/// itself -- so without a ceiling an anonymous caller decides how much of this
+/// service, and of the OAuth app's standing with GitHub, to consume.
+pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
+
 /// What the browser sends. Nothing else: this service uses only its own
 /// compiled client, secret, redirect URI, endpoint and notary, and accepts no
 /// caller-selected action, client, redirect, endpoint or return URL.
@@ -97,12 +115,6 @@ pub struct TokenRequestBody {
     code: String,
     /// The PKCE verifier the browser derived for this ceremony.
     code_verifier: String,
-}
-
-/// The bearer as GitHub returned it, read from the response body.
-#[derive(Deserialize)]
-struct GithubTokenBody {
-    access_token: String,
 }
 
 /// The notary's attestation of the exchange: the exact bytes it signed, and
@@ -116,7 +128,12 @@ struct AttestationBody {
     signature: String,
 }
 
-/// What the browser gets back. Every byte string is unpadded URL-safe base64.
+/// What the browser gets back.
+///
+/// `accessToken` is the bearer as GitHub spelled it, verbatim, because that is
+/// what the next request has to carry. The other two are byte strings and are
+/// unpadded URL-safe base64 — a caller that decodes all three the same way
+/// corrupts the one that was never encoded.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TokenResponseBody {
@@ -141,6 +158,26 @@ impl TokenError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+        }
+    }
+
+    /// A failure inside the exchange, answered according to whose it is.
+    ///
+    /// A code that was spent, replayed or never valid is ordinary user
+    /// behaviour — a double-clicked button, a reloaded callback — and the
+    /// browser can act on being told so. Everything else is this service, the
+    /// notary or GitHub, and the browser can only try again later.
+    fn from_exchange(cause: Error) -> Self {
+        match cause {
+            Error::OAuthFailed { .. } => {
+                tracing::warn!(%cause, "github refused the authorization code");
+                Self {
+                    status: StatusCode::BAD_REQUEST,
+                    message: "the authorization code was refused; start a fresh ceremony"
+                        .into(),
+                }
+            }
+            other => Self::upstream(other),
         }
     }
 
@@ -199,9 +236,21 @@ pub async fn github_token(
         .validate()
         .map_err(|e| TokenError::bad_request(e.to_string()))?;
 
+    // One permit, one session. Shed rather than queue: a caller told to come
+    // back is better served than one held behind a queue it cannot see, and an
+    // unbounded queue is the same exhaustion with a longer fuse.
+    let _permit = state
+        .exchange_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| TokenError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "too many exchanges in flight; retry shortly".into(),
+        })?;
+
     let response = exchange(&state, &request)
         .await
-        .map_err(TokenError::upstream)?;
+        .map_err(TokenError::from_exchange)?;
     // The bounds are checked on the way out as well as in: the three values are
     // one result, and one of them out of shape makes the other two worthless.
     response
@@ -225,9 +274,9 @@ pub async fn github_token(
 
 /// How every byte string in the response is spelled: unpadded URL-safe base64.
 ///
-/// One function rather than three call sites, because the three values are one
-/// result and a browser that decodes two of them differently from the third
-/// gets a proof that will not verify.
+/// One function rather than three call sites, because a browser that decodes
+/// two of them differently from the third gets a proof that will not verify.
+/// The bearer is not among them: it is a string GitHub chose, not bytes.
 fn b64(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -270,7 +319,7 @@ fn bearer_range(
 /// A layout that will not form is a transcript this service cannot describe —
 /// most often GitHub answering with an error object where the profile expects
 /// `access_token`, which is a bad code or a spent one rather than a fault here.
-fn layout_failed(e: ceremony::LayoutError) -> libid_tlsn::Error {
+fn layout_failed(e: &ceremony::LayoutError) -> libid_tlsn::Error {
     libid_tlsn::Error::Transcript(libid_transcript::Error::Transcript {
         detail: e.to_string(),
     })
@@ -345,6 +394,18 @@ fn bearer_blinder<'a>(
     }
 }
 
+/// What one session discloses, and the bearer it committed.
+struct Selection {
+    /// What the request reveals, and what it commits.
+    sent: ceremony::Layout,
+    /// The same for the response.
+    recv: ceremony::Layout,
+    /// Where the bearer sits in the received transcript.
+    bearer: Range<usize>,
+    /// The bearer itself, taken from that range of that transcript.
+    bearer_bytes: Vec<u8>,
+}
+
 /// What this session discloses, and where the bearer ends up.
 ///
 /// The single decision that matters to everyone downstream: the notary signs
@@ -352,15 +413,42 @@ fn bearer_blinder<'a>(
 /// and the browser's proof rests on the committed run in between. Each
 /// direction's commitments are the complement of its reveals, so both tile by
 /// construction — which is what the verifier's coverage check demands.
-fn select_layouts(
-    sent: &[u8],
-    recv: &[u8],
-) -> Result<(ceremony::Layout, ceremony::Layout, Range<usize>), libid_tlsn::Error> {
-    let sent_layout =
-        ceremony::token_request(sent, Some(SECRET_FIELD)).map_err(layout_failed)?;
-    let recv_layout = ceremony::token_response(recv).map_err(layout_failed)?;
-    let bearer = bearer_range(&recv_layout).map_err(layout_failed)?;
-    Ok((sent_layout, recv_layout, bearer))
+fn select_layouts(sent: &[u8], recv: &[u8]) -> Result<Selection, ceremony::LayoutError> {
+    let sent_layout = ceremony::token_request(sent, Some(SECRET_FIELD))?;
+    let recv_layout = ceremony::token_response(recv)?;
+    let bearer = bearer_range(&recv_layout)?;
+    // Read here, off the transcript the notary attests, and never off the
+    // decoded response body. REQ-PLAT-38 asks for the exact bearer the
+    // attestation commits, and the two are not always the same string: a JSON
+    // escape decodes, and a chunk boundary landing inside the value shifts
+    // everything after it. Handing back a bearer the commitment does not open
+    // fails later, in the circuit, where the reason is invisible.
+    let bearer_bytes = recv
+        .get(bearer.clone())
+        .ok_or_else(|| ceremony::LayoutError::MissingField("access_token".into()))?
+        .to_vec();
+    Ok(Selection {
+        sent: sent_layout,
+        recv: recv_layout,
+        bearer,
+        bearer_bytes,
+    })
+}
+
+/// GitHub answering the exchange with an error object rather than a bearer.
+///
+/// A spent, replayed or forged code lands here, and it is the caller's to fix
+/// rather than this service's or the notary's: the session ran, the response
+/// arrived, and it carried no `access_token` for the layout to anchor on. Told
+/// apart from every other session failure because the two deserve different
+/// answers — one says come back with a fresh code, the other says something
+/// here is broken.
+fn platform_refusal(refusal: Option<&ceremony::LayoutError>) -> Option<Error> {
+    matches!(refusal, Some(ceremony::LayoutError::MissingField(f)) if f == "access_token")
+        .then(|| Error::OAuthFailed {
+            platform: "github".into(),
+            detail: "the token endpoint returned no access_token".into(),
+        })
 }
 
 /// Open the session the notary answers on.
@@ -388,25 +476,39 @@ async fn exchange(
     let http_request = token_http_request(state, request)?;
     let socket = connect_notary(&state.notary_addr).await?;
 
-    // Where the bearer sat in the response, taken from the layout that decided
-    // it rather than searched for again afterwards. The layout works on the
-    // raw received transcript, so these offsets have no meaning in the decoded
-    // body and cannot be recovered from it.
-    let mut bearer: Option<Range<usize>> = None;
+    // What the layout decided, kept from inside the session. The bearer's
+    // offsets index the raw received transcript, so neither they nor the bytes
+    // at them can be recovered afterwards from the decoded body.
+    let mut selected: Option<(Range<usize>, Vec<u8>)> = None;
+    // Why the layout would not form, for the same reason: the error
+    // `prover_generic` propagates says a transcript was refused, not which of
+    // the two parties has something to fix.
+    let mut refusal: Option<ceremony::LayoutError> = None;
 
     // The layouts state what this session discloses, and each direction's
     // commitments are the complement of its reveals — so the transcript tiles
     // by construction, which is what the Platform Verifier's coverage check
     // demands.
-    let mut result = tokio::time::timeout(
+    let session = tokio::time::timeout(
         SESSION_TIMEOUT,
         libid_tlsn::prover_generic(
             socket,
             http_request,
-            |sent, recv| {
-                let (sent_layout, recv_layout, found) = select_layouts(sent, recv)?;
-                bearer = Some(found);
-                Ok((sent_layout, recv_layout))
+            |sent, recv| match select_layouts(sent, recv) {
+                Ok(Selection {
+                    sent,
+                    recv,
+                    bearer,
+                    bearer_bytes,
+                }) => {
+                    selected = Some((bearer, bearer_bytes));
+                    Ok((sent, recv))
+                }
+                Err(e) => {
+                    let failed = layout_failed(&e);
+                    refusal = Some(e);
+                    Err(failed)
+                }
             },
             |_step| {},
         ),
@@ -414,9 +516,16 @@ async fn exchange(
     .await
     .map_err(|_| Error::MpcTlsFailed {
         detail: "the notarized session did not finish in time".into(),
-    })??;
+    })?;
 
-    let bearer = bearer.ok_or_else(|| Error::MpcTlsFailed {
+    let mut result = match session {
+        Ok(result) => result,
+        Err(e) => {
+            return Err(platform_refusal(refusal.as_ref()).unwrap_or_else(|| e.into()))
+        }
+    };
+
+    let (bearer, bearer_bytes) = selected.ok_or_else(|| Error::MpcTlsFailed {
         detail: "the session produced no layout".into(),
     })?;
 
@@ -434,23 +543,31 @@ async fn exchange(
     // The notary answers a completed session on the socket the session ran
     // over. It reads no attestation request: everything it signs it observed
     // itself, so there is nothing left for this side to ask for.
-    let wire: AttestationWire = libid_transcript::read_msg(&mut result.recovered_io)
-        .await
-        .map_err(|e| Error::MpcTlsFailed {
-            // Most often an end of file: the notary refused the session after
-            // running it — its own signer failing, say — and closed without
-            // writing a record. Said plainly here, because a bare io error at
-            // this point reads as a network fault rather than a refusal.
-            detail: format!("the notary sent no record for the session it ran: {e}"),
+    let wire: AttestationWire = tokio::time::timeout(
+        RECORD_TIMEOUT,
+        libid_transcript::read_msg(&mut result.recovered_io),
+    )
+    .await
+    .map_err(|_| Error::MpcTlsFailed {
+        detail: "the notary ran the session and then sent no record in time".into(),
+    })?
+    .map_err(|e| Error::MpcTlsFailed {
+        // Most often an end of file: the notary refused the session after
+        // running it — its own signer failing, say — and closed without
+        // writing a record. Said plainly here, because a bare io error at
+        // this point reads as a network fault rather than a refusal.
+        detail: format!("the notary sent no record for the session it ran: {e}"),
+    })?;
+
+    // The committed bytes, not a second reading of the same value: what the
+    // browser is handed has to be what the attestation's commitment opens.
+    let access_token =
+        String::from_utf8(bearer_bytes).map_err(|e| Error::MpcTlsFailed {
+            detail: format!("the committed bearer is not valid UTF-8: {e}"),
         })?;
 
-    // The layout already proved the anchor is in the transcript, so a body
-    // without the field here is this service disagreeing with itself rather
-    // than GitHub refusing the exchange.
-    let body: GithubTokenBody = serde_json::from_slice(&result.response_body)?;
-
     Ok(TokenResponse {
-        access_token: body.access_token,
+        access_token,
         token_attestation: TokenAttestation {
             attested_data: wire.attested_data,
             signature: wire.notary_signature,
@@ -464,8 +581,10 @@ mod tests {
     use super::*;
 
     /// The head this service writes, as `prover_generic` will send it: header
-    /// names go on the wire lowercase, and the body follows the blank line.
-    const HEAD: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\ncontent-type: application/x-www-form-urlencoded\r\naccept: application/json\r\nconnection: close\r\n\r\n";
+    /// names go on the wire lowercase, and hyper adds the `content-length` a
+    /// sized body implies. A fixture missing it would put every offset below a
+    /// few bytes away from the transcript a real session produces.
+    const HEAD: &str = "POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\ncontent-type: application/x-www-form-urlencoded\r\naccept: application/json\r\nconnection: close\r\n";
 
     fn state(client_secret: &str) -> AppState {
         AppState {
@@ -478,6 +597,9 @@ mod tests {
                 redirect_uri: "http://127.0.0.1:8722/api/v1/ceremony/callback".into(),
             },
             app_url: None,
+            exchange_permits: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_EXCHANGES,
+            )),
         }
     }
 
@@ -490,9 +612,8 @@ mod tests {
 
     /// What the session will see in the sent direction.
     fn sent(state: &AppState, request: &TokenRequest) -> Vec<u8> {
-        let mut out = HEAD.to_vec();
-        out.extend_from_slice(token_request_body(state, request).as_bytes());
-        out
+        let body = token_request_body(state, request);
+        format!("{HEAD}content-length: {}\r\n\r\n{body}", body.len()).into_bytes()
     }
 
     /// The property the whole design rests on: everything that proves this
@@ -568,11 +689,12 @@ mod tests {
     fn both_directions_of_the_session_tile() {
         let state = state("ghs_averyrealisticlookingclientsecret00");
         let sent = sent(&state, &request());
-        let (sl, rl, bearer) = select_layouts(&sent, RECV).unwrap();
+        let found = select_layouts(&sent, RECV).unwrap();
 
-        for (layout, len, what) in
-            [(sl, sent.len(), "request"), (rl, RECV.len(), "response")]
-        {
+        for (layout, len, what) in [
+            (&found.sent, sent.len(), "request"),
+            (&found.recv, RECV.len(), "response"),
+        ] {
             let mut spans: Vec<_> = layout
                 .reveal
                 .iter()
@@ -589,7 +711,14 @@ mod tests {
             assert_eq!(at, len, "{what}: coverage stops short");
         }
 
-        assert_eq!(&RECV[bearer], b"gho_16C7e42F292c6912E7710c838347Ae178B4a");
+        assert_eq!(
+            &RECV[found.bearer.clone()],
+            b"gho_16C7e42F292c6912E7710c838347Ae178B4a"
+        );
+        // REQ-PLAT-38: what this route returns is the bearer the attestation
+        // commits, read off the attested transcript rather than re-parsed from
+        // the decoded body, which need not spell it the same way.
+        assert_eq!(found.bearer_bytes, &RECV[found.bearer]);
     }
 
     /// GitHub answers a spent or forged code with `200` and an error object.
@@ -602,6 +731,44 @@ mod tests {
         const ERROR: &[u8] =
             b"HTTP/1.1 200 OK\r\n\r\n{\"error\":\"bad_verification_code\"}";
         assert!(select_layouts(&sent, ERROR).is_err());
+    }
+
+    /// A response with no bearer is GitHub refusing the code — a spent one, a
+    /// replayed one, one for another client. The caller can act on that, so it
+    /// gets a 4xx and a log line at warn, not a 502 and an incident.
+    #[test]
+    fn a_refused_code_is_told_apart_from_a_broken_session() {
+        let refused = ceremony::LayoutError::MissingField("access_token".into());
+        assert!(matches!(
+            platform_refusal(Some(&refused)),
+            Some(Error::OAuthFailed { .. })
+        ));
+        assert_eq!(
+            TokenError::from_exchange(platform_refusal(Some(&refused)).unwrap()).status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// Everything else is this service, the notary or the network. A request
+    /// body that will not form a layout is THIS service disagreeing with
+    /// itself, and a caller can do nothing about it — so it must not be
+    /// reported as the caller's fault.
+    #[test]
+    fn every_other_failure_stays_an_upstream_fault() {
+        for other in [
+            Some(&ceremony::LayoutError::MissingCredential),
+            Some(&ceremony::LayoutError::NoHeadBoundary),
+            None,
+        ] {
+            assert!(platform_refusal(other).is_none(), "{other:?}");
+        }
+        assert_eq!(
+            TokenError::from_exchange(Error::MpcTlsFailed {
+                detail: "the notary went away".into(),
+            })
+            .status,
+            StatusCode::BAD_GATEWAY
+        );
     }
 
     /// The opening this route hands back must open the bearer and not one of

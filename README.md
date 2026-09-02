@@ -70,7 +70,8 @@ notary are this server's own, and none of them is selectable by a caller:
 { "code": "…", "codeVerifier": "…" }
 ```
 
-Response, every byte string unpadded URL-safe base64:
+Response. `accessToken` is the bearer as GitHub spelled it; the other two
+are byte strings, unpadded URL-safe base64:
 
 ```json
 {

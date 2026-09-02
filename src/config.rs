@@ -12,10 +12,12 @@ use url::Url;
 /// `BACKEND_SIGNING_KEY`: this service holds no key of its own. It used to
 /// countersign every proof, which looked like a second trust root but never
 /// was one — the backend IS that signer, so a compromised backend simply
-/// signed whichever pairing it liked. See the [`crate::flow`] module docs for
-/// what the second signature did and did not buy. Nothing else here changed:
-/// `NOTARY_ADDRESS`, `CHAIN_ID` and `VERIFIER_CONTRACT_ADDRESS` still describe
-/// the notary digest, which is unaffected.
+/// signed whichever pairing it liked.
+///
+/// `NOTARY_ADDRESS`, `CHAIN_ID` and `VERIFIER_CONTRACT_ADDRESS` are gone with
+/// it. They described a proof this service no longer verifies: the browser
+/// checks the notary's attestation itself, and the Platform Verifier checks it
+/// on chain. Nothing here reads a contract or a chain.
 #[derive(Debug, Parser)]
 #[command(name = "libid-server-rs", version, about)]
 pub struct Config {
@@ -27,9 +29,14 @@ pub struct Config {
     #[arg(long, env = "PORT", default_value = "8722")]
     pub port: u16,
 
-    /// Public base URL of THIS server. The GitHub OAuth callback URL is
-    /// derived as `{BASE_URL}/auth/github/callback` and must match the OAuth
-    /// App registration exactly.
+    /// Public base URL of THIS server, as a bare origin: scheme, host and, if
+    /// it is not the default, port. A path, query, fragment or credentials are
+    /// refused at startup, because the token route compares a request's
+    /// `Origin` against this and a browser sends none of them.
+    ///
+    /// The GitHub OAuth callback URL is derived as
+    /// `{BASE_URL}/api/v1/ceremony/callback` and must match the OAuth App
+    /// registration exactly.
     #[arg(long, env = "BASE_URL", default_value = "http://127.0.0.1:8722")]
     pub base_url: String,
 

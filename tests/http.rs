@@ -15,10 +15,11 @@ use libid_server_rs::{
     routes,
     state::AppState,
 };
+use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
 /// The state carries no signing identity: the service holds no key.
-fn test_state(app_url: Option<&str>) -> Arc<AppState> {
+fn state_with(app_url: Option<&str>, permits: usize) -> Arc<AppState> {
     Arc::new(AppState {
         server_origin: "http://127.0.0.1:8722".into(),
         allowed_app_origins: vec!["http://localhost:3000".into()],
@@ -29,7 +30,13 @@ fn test_state(app_url: Option<&str>) -> Arc<AppState> {
             redirect_uri: "http://127.0.0.1:8722/api/v1/ceremony/callback".into(),
         },
         app_url: app_url.map(str::to_string),
+        exchange_permits: Arc::new(Semaphore::new(permits)),
     })
+}
+
+/// A state whose exchange ceiling is the default.
+fn test_state(app_url: Option<&str>) -> Arc<AppState> {
+    state_with(app_url, routes::github_token::MAX_CONCURRENT_EXCHANGES)
 }
 
 fn app(state: Arc<AppState>) -> axum::Router {
@@ -164,6 +171,22 @@ async fn github_token_refuses_a_verifier_of_the_wrong_length() {
     let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
     let resp = post_token(Some(ORIGIN), body.into()).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Each exchange is a full MPC-TLS session and an outbound request that spends
+/// the client secret, and the origin check is not caller authentication. So the
+/// ceiling is real, and a request that finds it is shed rather than queued —
+/// held requests are the same exhaustion with a longer fuse.
+#[tokio::test]
+async fn github_token_sheds_when_no_permit_is_free() {
+    let req = Request::post("/api/v1/ceremony/github-token")
+        .header("content-type", "application/json")
+        .header("origin", ORIGIN)
+        .body(Body::from(valid_body()))
+        .unwrap();
+    let resp = app(state_with(None, 0)).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
 
 /// The origin is checked before the body is even parsed, so a foreign page
