@@ -26,13 +26,14 @@ publish = false
 # release yet. The revision carries the merged alpha.15 upgrade as well, so
 # this is the release graph plus that one branch. Move to the tag the day
 # libid-rs cuts one containing `libid-ceremony`.
-libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "dec025b" }
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "dec025b" }
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "dec025b" }
-libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "dec025b" }
-# Upstream TLSNotary, the same pin libid-rs uses. Needed directly for the
-# attestation/presentation types (`Attestation`, `CryptoProvider`, `Secrets`).
-tlsn = { git = "https://github.com/tlsnotary/tlsn", tag = "v0.1.0-alpha.15" }
+libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
+# Upstream TLSNotary is NOT a direct dependency. Everything this service reads
+# off a session — `CommitmentOpening` and the `Direction` it carries — comes
+# re-exported from libid-tlsn, which pins tlsn itself. One pin, so the graph
+# cannot hold two incompatible copies of the same types.
 
 # ── proof ABI types ─────────────────────────────────────────────────────
 alloy-primitives = { version = "1", features = ["serde"] }

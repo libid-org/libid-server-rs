@@ -45,12 +45,15 @@ use libid_ceremony::token_exchange::{
     TokenRequest,
     TokenResponse,
 };
-use libid_transcript::ceremony;
+use libid_tlsn::Direction;
+use libid_transcript::{
+    ceremony,
+    AttestationWire,
+};
 use serde::{
     Deserialize,
     Serialize,
 };
-use tlsn::transcript::Direction;
 
 use crate::{
     error::Error,
@@ -94,20 +97,6 @@ pub struct TokenRequestBody {
     code: String,
     /// The PKCE verifier the browser derived for this ceremony.
     code_verifier: String,
-}
-
-/// The notary's answer to a completed session, read off the recovered socket.
-///
-/// A mirror of `AttestationWire` in `notary/src/server.rs`, which is private
-/// there and serialize-only. The two must agree field for field: this is a
-/// length-prefixed JSON message, so a rename on either side fails at read time
-/// with a JSON error that says nothing about which side moved.
-#[derive(Deserialize)]
-struct AttestationWire {
-    /// The exact bytes of ceremony-common section 9.1.
-    attested_data: Vec<u8>,
-    /// EIP-191 over `keccak256(attested_data)`.
-    notary_signature: Vec<u8>,
 }
 
 /// The bearer as GitHub returned it, read from the response body.
