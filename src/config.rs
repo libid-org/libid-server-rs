@@ -48,31 +48,6 @@ pub struct Config {
     #[arg(long, env = "NOTARY_URL", default_value = "tcp://127.0.0.1:7047")]
     pub notary_url: Url,
 
-    /// Ethereum address of the notary — the only trust root in the proof.
-    /// Every proof's notary signature must recover to this address or the
-    /// flow fails before a proof is handed to the client.
-    #[arg(long, env = "NOTARY_ADDRESS")]
-    pub notary_address: String,
-
-    /// EVM chain id of the target deployment. Bound into the notary digest
-    /// as a domain separator — a proof for chain A does not verify on
-    /// chain B.
-    #[arg(long, env = "CHAIN_ID")]
-    pub chain_id: u64,
-
-    /// The contract address bound into the MPC-TLS notary digest.
-    ///
-    /// LOUD WARNING, learned the hard way: this is the address of the
-    /// contract that VERIFIES the notary signature on-chain — for the naming
-    /// deployment that is `GitHubIdentityVerifier`, NOT `IdentityNames`.
-    /// The predecessor backend called the same value
-    /// `REGISTRY_CONTRACT_ADDRESS`, which misled operators into pointing it
-    /// at the registry; every bind then reverts with a notary-signature
-    /// failure because the digest is domain-separated by
-    /// `(chainId, verifyingContract)`.
-    #[arg(long, env = "VERIFIER_CONTRACT_ADDRESS")]
-    pub verifier_contract_address: String,
-
     /// GitHub OAuth App client ID (read-only app; no GitHub App needed).
     #[arg(long, env = "GH_OAUTH_CLIENT_ID")]
     pub gh_oauth_client_id: String,
@@ -80,10 +55,6 @@ pub struct Config {
     /// GitHub OAuth App client secret.
     #[arg(long, env = "GH_OAUTH_CLIENT_SECRET")]
     pub gh_oauth_client_secret: String,
-
-    /// Seconds a challenge (and its finished result) stays available.
-    #[arg(long, env = "CHALLENGE_TTL_SECS", default_value = "300")]
-    pub challenge_ttl_secs: u64,
 }
 
 impl Config {

@@ -10,12 +10,9 @@
 
 pub mod config;
 pub mod error;
-pub mod flow;
 pub mod oauth;
-pub mod platform;
 pub mod routes;
 pub mod state;
-pub mod types;
 
 use std::sync::Arc;
 
@@ -23,55 +20,38 @@ use error::{
     Error,
     Result,
 };
-use state::{
-    AppState,
-    Runtime,
-};
+use state::AppState;
 
-/// Build the shared [`AppState`] from parsed configuration. Parses the
-/// addresses that must be well-formed for any proof to verify, so a typo
-/// fails at startup rather than on the first claim.
+/// Build the shared [`AppState`] from parsed configuration.
 ///
-/// This holds no key material of any kind: the service signs nothing.
-pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
-    let notary_address = libid_crypto::hex_to_address(&cfg.notary_address)?;
-    let verifier_contract = libid_crypto::hex_to_address(&cfg.verifier_contract_address)?;
-
+/// Everything that must be well-formed for a request to succeed is parsed
+/// here, so a typo fails at startup rather than on someone's ceremony.
+///
+/// It holds no key material beyond GitHub's client secret, and signs nothing:
+/// the notary signs, and this service carries what it said.
+pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     if cfg.base_url.is_empty() {
         return Err(Error::Config {
-            detail: "BASE_URL must be set — GitHub redirects the browser to \
-                     {BASE_URL}/auth/github/callback"
+            detail: "BASE_URL must be set \u{2014} it is this service's own origin, \
+                     which the GitHub token route checks callers against"
                 .into(),
         });
     }
-
-    let app_url = if cfg.app_url.is_empty() {
-        None
-    } else {
-        Some(cfg.app_url.clone())
-    };
-
-    let github_oauth = oauth::OAuthCredentials {
-        client_id: cfg.gh_oauth_client_id.clone(),
-        client_secret: cfg.gh_oauth_client_secret.clone(),
-        redirect_uri: format!(
-            "{}/auth/github/callback",
-            cfg.base_url.trim_end_matches('/')
-        ),
-    };
+    let server_origin = cfg.base_url.trim_end_matches('/').to_string();
 
     Ok(Arc::new(AppState {
-        runtime: Runtime {
-            base_url: cfg.base_url.clone(),
-            app_url,
-            notary_url: cfg.notary_url.clone(),
-            notary_address,
-            chain_id: cfg.chain_id,
-            verifier_contract,
-            challenge_ttl_secs: cfg.challenge_ttl_secs,
+        github_oauth: oauth::OAuthCredentials {
+            client_id: cfg.gh_oauth_client_id.clone(),
+            client_secret: cfg.gh_oauth_client_secret.clone(),
+            // The registered redirect URI is the callback document this
+            // service serves, and the browser sends the same bytes back in the
+            // token request. Both sides must spell it identically or GitHub
+            // refuses the exchange.
+            redirect_uri: format!("{server_origin}/api/v1/ceremony/callback"),
         },
-        github_oauth,
-        challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        results: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        allowed_app_origins: cfg.allowed_origin_patterns(),
+        notary_url: cfg.notary_url.to_string(),
+        app_url: (!cfg.app_url.is_empty()).then(|| cfg.app_url.clone()),
+        server_origin,
     }))
 }

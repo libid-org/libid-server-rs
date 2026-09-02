@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let allowed_origins = cfg.allowed_origin_patterns();
     let addr = format!("{}:{}", cfg.host, cfg.port);
 
-    let state = build_state(&cfg).await?;
+    let state = build_state(&cfg)?;
     let app = routes::build_router()
         .with_state(state)
         .layer(routes::cors_layer(allowed_origins));

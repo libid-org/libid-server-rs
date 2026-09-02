@@ -35,7 +35,7 @@ use crate::state::AppState;
 pub async fn gmail_callback(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let app_url = state.runtime.app_url.as_deref().ok_or_else(|| {
+    let app_url = state.app_url.as_deref().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "APP_URL not configured — set APP_URL env so the OIDC callback knows where the frontend lives".to_string(),

@@ -1,27 +1,24 @@
 //! HTTP route table and CORS. The full endpoint surface, deliberately tiny:
 //!
 //! - `GET  /health`
-//! - `POST /auth/github/challenge`
-//! - `GET  /auth/github/callback`
-//! - `GET  /auth/github/result/{challenge}`
 //! - `GET  /auth/gmail/callback`
 //!
-//! X gets NO backend endpoints: its browser flow talks to the notary
-//! directly.
+//! Neither X nor Google needs a confidential route: their ceremonies run in
+//! the browser against the notary. Google keeps the relay above only because
+//! it returns its credential in a fragment, which never reaches a server —
+//! the relay hands that fragment back to the application origin and does
+//! nothing else.
+//!
+//! GitHub's token route lands next, and is the one route a platform ceremony
+//! genuinely requires of a server.
 
-pub mod callback;
-pub mod challenge;
 pub mod gmail;
-pub mod result;
 
 use std::sync::Arc;
 
 use axum::{
     http::HeaderValue,
-    routing::{
-        get,
-        post,
-    },
+    routing::get,
     Router,
 };
 use tower_http::cors::CorsLayer;
@@ -37,12 +34,6 @@ async fn health() -> &'static str {
 pub fn build_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/health", get(health))
-        .route("/auth/github/challenge", post(challenge::challenge_github))
-        .route("/auth/github/callback", get(callback::callback_github))
-        .route(
-            "/auth/github/result/{challenge}",
-            get(result::result_github),
-        )
         .route("/auth/gmail/callback", get(gmail::gmail_callback))
 }
 
