@@ -21,7 +21,7 @@ Built on the [libid-rs](https://github.com/libid-org/libid-rs) crates
 1. The browser derives its PKCE verifier, opens GitHub's authorization page,
    and consumes the redirect against the ceremony it started. None of that
    reaches this service.
-2. It calls `POST /api/v1/ceremony/github-token` with the authorization code
+2. It calls `POST /oauth/github/token-exchange` with the authorization code
    and that verifier. This service performs the token exchange **inside a
    TLSNotary session**, revealing the client id, the code, the redirect URI
    and the verifier, and committing the client secret and the returned bearer
@@ -55,9 +55,9 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. |
-| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from this server's own origin. |
+| `POST` | `/oauth/github/token-exchange` | The confidential token exchange, run inside a TLSNotary session. Callable only from this server's own origin. |
 
-### `POST /api/v1/ceremony/github-token`
+### `POST /oauth/github/token-exchange`
 
 The one route a platform ceremony genuinely requires of a server, because it is
 the one step needing a client secret.
@@ -66,19 +66,26 @@ Request — and nothing else; the client, secret, redirect URI, endpoint and
 notary are this server's own, and none of them is selectable by a caller:
 
 ```json
-{ "code": "…", "codeVerifier": "…" }
+{ "schema": 1, "code": "…", "codeVerifier": "…" }
 ```
 
-Response. `accessToken` is the bearer as GitHub spelled it; the other two
-are byte strings, unpadded URL-safe base64:
+Response. `accessToken` is the bearer as GitHub spelled it; the other two are
+byte strings, unpadded URL-safe base64:
 
 ```json
 {
+  "schema": 1,
   "accessToken": "…",
-  "tokenAttestation": { "attestedData": "…", "signature": "…" },
+  "tokenAttestation": "…",
   "bearerOpening": "…"
 }
 ```
+
+`tokenAttestation` decodes to the section 9.1 record followed by the notary's
+65-byte signature over its keccak256 digest. That layout is fixed by
+`TokenAttestation::encode` in `libid-ceremony`, which both sides of the wire
+read; the specification requires the attestation to carry the signature
+(REQ-PLAT-45) but does not say where in the string it sits.
 
 The exchange reveals what proves the request belongs to the ceremony — the
 client id, the code, the redirect URI and the PKCE verifier — and commits the
