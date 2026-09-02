@@ -26,36 +26,32 @@ publish = false
 # release yet. The revision carries the merged alpha.15 upgrade as well, so
 # this is the release graph plus that one branch. Move to the tag the day
 # libid-rs cuts one containing `libid-ceremony`.
-libid-attestations = { git = "https://github.com/libid-org/libid-rs", rev = "c490e4eb365595fd9a70d2deec51dabc42956680" }
-libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "c490e4eb365595fd9a70d2deec51dabc42956680" }
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "c490e4eb365595fd9a70d2deec51dabc42956680" }
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "c490e4eb365595fd9a70d2deec51dabc42956680" }
-libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "c490e4eb365595fd9a70d2deec51dabc42956680" }
+libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "dec025b" }
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "dec025b" }
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "dec025b" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "dec025b" }
 # Upstream TLSNotary, the same pin libid-rs uses. Needed directly for the
 # attestation/presentation types (`Attestation`, `CryptoProvider`, `Secrets`).
 tlsn = { git = "https://github.com/tlsnotary/tlsn", tag = "v0.1.0-alpha.15" }
 
 # ── proof ABI types ─────────────────────────────────────────────────────
 alloy-primitives = { version = "1", features = ["serde"] }
-alloy-sol-types = "1"
 
 # ── HTTP server / client ────────────────────────────────────────────────
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
-    "json",
-] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # ── everything else ─────────────────────────────────────────────────────
 base64 = "0.22"
+# The notarized request is built as a `hyper::Request`, which is what
+# `prover_generic` takes: the session drives the exchange itself rather than
+# handing it to an HTTP client.
+bytes = "1"
+http-body-util = "0.1"
+hyper = "1"
 clap = { version = "4", features = ["derive", "env"] }
-hex = "0.4"
-k256 = { version = "0.13", features = ["ecdsa"] }
-rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -71,5 +67,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [dev-dependencies]
-http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

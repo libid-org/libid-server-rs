@@ -21,6 +21,7 @@ use error::{
     Result,
 };
 use state::AppState;
+use url::Url;
 
 /// Build the shared [`AppState`] from parsed configuration.
 ///
@@ -50,8 +51,80 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             redirect_uri: format!("{server_origin}/api/v1/ceremony/callback"),
         },
         allowed_app_origins: cfg.allowed_origin_patterns(),
-        notary_url: cfg.notary_url.to_string(),
+        notary_addr: notary_addr(&cfg.notary_url)?,
         app_url: (!cfg.app_url.is_empty()).then(|| cfg.app_url.clone()),
         server_origin,
     }))
+}
+
+/// The `host:port` of the notary, taken from its configured URL.
+///
+/// The scheme is not consulted: the Rust prover speaks the notary's raw TCP
+/// protocol, and `tcp://` is how the default spells that. What must be there
+/// is an authority, because a session cannot be opened without one.
+fn notary_addr(url: &Url) -> Result<String> {
+    let host = url.host_str().ok_or_else(|| Error::NotaryUrl {
+        detail: format!("{url} names no host"),
+    })?;
+    let port = url.port().ok_or_else(|| Error::NotaryUrl {
+        detail: format!("{url} names no port"),
+    })?;
+    Ok(format!("{host}:{port}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(args: &[&str]) -> config::Config {
+        let mut argv = vec![
+            "libid-server-rs",
+            "--gh-oauth-client-id",
+            "Iv1.0123456789abcdef",
+            "--gh-oauth-client-secret",
+            "ghs_secret",
+        ];
+        argv.extend_from_slice(args);
+        <config::Config as clap::Parser>::parse_from(argv)
+    }
+
+    /// The redirect URI is derived, not configured, and GitHub refuses an
+    /// exchange whose two spellings differ. So it has to be exactly the
+    /// callback route under the configured base URL — including when that base
+    /// URL is given with a trailing slash.
+    #[test]
+    fn the_redirect_uri_is_the_callback_route_under_the_base_url() {
+        let state = build_state(&config(&["--base-url", "https://id.example/"])).unwrap();
+        assert_eq!(state.server_origin, "https://id.example");
+        assert_eq!(
+            state.github_oauth.redirect_uri,
+            "https://id.example/api/v1/ceremony/callback"
+        );
+    }
+
+    /// The notary address is resolved once here rather than per ceremony.
+    #[test]
+    fn the_state_carries_a_connectable_notary_address() {
+        let state = build_state(&config(&[])).unwrap();
+        assert_eq!(state.notary_addr, "127.0.0.1:7047");
+        assert!(build_state(&config(&["--notary-url", "tcp://notary.example"])).is_err());
+    }
+
+    /// The default spelling, and the one the deployment uses.
+    #[test]
+    fn a_tcp_notary_url_yields_its_authority() {
+        let url = Url::parse("tcp://127.0.0.1:7047").unwrap();
+        assert_eq!(notary_addr(&url).unwrap(), "127.0.0.1:7047");
+    }
+
+    /// The prover speaks the notary's raw TCP protocol, so there is no port to
+    /// infer from a scheme. A URL missing either half is refused at startup
+    /// rather than on the first ceremony that reaches it.
+    #[test]
+    fn a_notary_url_missing_an_authority_is_refused() {
+        for spelling in ["tcp://notary.example", "tcp:7047", "file:///notary"] {
+            let url = Url::parse(spelling).unwrap();
+            assert!(notary_addr(&url).is_err(), "{spelling} names no host:port");
+        }
+    }
 }

@@ -22,7 +22,7 @@ fn test_state(app_url: Option<&str>) -> Arc<AppState> {
     Arc::new(AppState {
         server_origin: "http://127.0.0.1:8722".into(),
         allowed_app_origins: vec!["http://localhost:3000".into()],
-        notary_url: "tcp://127.0.0.1:7047".into(),
+        notary_addr: "127.0.0.1:7047".into(),
         github_oauth: libid_server_rs::oauth::OAuthCredentials {
             client_id: "test-client-id".into(),
             client_secret: "test-client-secret".into(),
@@ -85,4 +85,91 @@ async fn gmail_relay_requires_app_url() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+// ─── the GitHub token route ──────────────────────────────────────────────────
+//
+// Every case here is refused before a notary session is opened, which is the
+// point: a request that will not be honoured must not cost an MPC-TLS session,
+// and must not spend the client secret. That they can be driven at all without
+// a notary listening is the evidence.
+
+const ORIGIN: &str = "http://127.0.0.1:8722";
+const VERIFIER: &str = "iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I";
+
+async fn post_token(origin: Option<&str>, body: String) -> axum::response::Response {
+    let mut req = Request::post("/api/v1/ceremony/github-token")
+        .header("content-type", "application/json");
+    if let Some(origin) = origin {
+        req = req.header("origin", origin);
+    }
+    app(test_state(None))
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+}
+
+fn valid_body() -> String {
+    format!(r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#)
+}
+
+#[tokio::test]
+async fn github_token_refuses_a_foreign_origin() {
+    let resp = post_token(Some("https://evil.example"), valid_body()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp.headers().get("cache-control").unwrap(),
+        "no-store",
+        "a refusal is no more cacheable than an answer"
+    );
+}
+
+#[tokio::test]
+async fn github_token_refuses_a_request_with_no_origin() {
+    let resp = post_token(None, valid_body()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// The route takes a code and a verifier and nothing else. A body carrying a
+/// `redirectUri`, a `clientId` or an endpoint is refused rather than ignored:
+/// silently dropping them would leave a caller believing it had steered
+/// something.
+#[tokio::test]
+async fn github_token_refuses_a_body_that_tries_to_steer_the_exchange() {
+    let body = format!(
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"https://evil.example/cb"}}"#
+    );
+    let resp = post_token(Some(ORIGIN), body).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn github_token_refuses_a_malformed_body() {
+    let resp = post_token(Some(ORIGIN), "{\"code\":".into()).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn github_token_refuses_an_over_long_code() {
+    let body = format!(
+        r#"{{"code":"{}","codeVerifier":"{VERIFIER}"}}"#,
+        "a".repeat(4096)
+    );
+    let resp = post_token(Some(ORIGIN), body).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn github_token_refuses_a_verifier_of_the_wrong_length() {
+    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
+    let resp = post_token(Some(ORIGIN), body.into()).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// The origin is checked before the body is even parsed, so a foreign page
+/// cannot use a malformed body to tell one refusal from the other.
+#[tokio::test]
+async fn github_token_checks_the_origin_before_the_body() {
+    let resp = post_token(Some("https://evil.example"), "not json at all".into()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }

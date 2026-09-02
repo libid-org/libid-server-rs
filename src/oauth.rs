@@ -20,9 +20,11 @@ pub struct OAuthCredentials {
     /// notarized transcript, and is committed rather than disclosed so that no
     /// party proves its contents.
     ///
-    /// It must contain neither `&` nor `=`: the secret is redacted and nobody
-    /// proves what is in it, so one carrying a form delimiter would make this
-    /// service's own request decode as more fields than it sends.
+    /// Nobody proves what is in it, so a secret carrying a form delimiter
+    /// would be the one field able to forge another. It cannot: the request
+    /// body is built with a form serializer, which percent-encodes `&` and `=`
+    /// in a value, so the boundary the disclosure layout anchors on is always
+    /// the one this service wrote.
     pub client_secret: String,
     /// The registered redirect URI, byte for byte as GitHub has it. The
     /// browser sends the same bytes in the token request, and GitHub refuses

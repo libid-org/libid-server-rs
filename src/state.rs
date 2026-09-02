@@ -21,8 +21,13 @@ pub struct AppState {
     /// The application origins allowed to read the public ceremony
     /// configuration.
     pub allowed_app_origins: Vec<String>,
-    /// The notary this service opens its token session against.
-    pub notary_url: String,
+    /// The notary this service opens its token session against, as the
+    /// `host:port` a TCP connect takes.
+    ///
+    /// Resolved from the configured URL once at startup, so a notary URL that
+    /// names no host or no port stops the process from coming up rather than
+    /// failing the first ceremony that reaches it.
+    pub notary_addr: String,
     /// GitHub's confidential client. The secret never leaves this process and
     /// is never revealed in a notarized transcript.
     pub github_oauth: OAuthCredentials,

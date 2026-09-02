@@ -56,9 +56,41 @@ out; origin checks and a closed input surface cannot constrain its owner.
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. |
 | `GET` | `/auth/gmail/callback` | Static, CSP-locked fragment relay for the Google OIDC flow: forwards `location.hash` — the id_token, which never reaches any server — to `{APP_URL}/auth/gmail/callback`. Requires `APP_URL`. |
+| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from this server's own origin. |
 
-`POST /api/v1/ceremony/github-token` lands next; it is the one route a
-platform ceremony genuinely requires of a server.
+### `POST /api/v1/ceremony/github-token`
+
+The one route a platform ceremony genuinely requires of a server, because it is
+the one step needing a client secret.
+
+Request — and nothing else; the client, secret, redirect URI, endpoint and
+notary are this server's own, and none of them is selectable by a caller:
+
+```json
+{ "code": "…", "codeVerifier": "…" }
+```
+
+Response, every byte string unpadded URL-safe base64:
+
+```json
+{
+  "accessToken": "…",
+  "tokenAttestation": { "attestedData": "…", "signature": "…" },
+  "bearerOpening": "…"
+}
+```
+
+The exchange reveals what proves the request belongs to the ceremony — the
+client id, the code, the redirect URI and the PKCE verifier — and commits the
+`client_secret` and the returned bearer instead of disclosing them. The secret
+is ordered last in the request body so the committed run is a suffix rather
+than a hole, which is what lets the transcript tile.
+
+The three values are one result. The attestation without the opening proves
+nothing about the bearer, and the opening without the attestation proves
+nothing at all, so a failure returns none of them and the caller starts a fresh
+ceremony. Nothing about the request is stored: a timeout, a duplicate or a
+restart leaves nothing to resume from.
 
 Neither X nor Google gets a confidential route. Both run browser ↔ notary, and
 a server-side X callback was proposed and rejected: X's flow is browser-only by
