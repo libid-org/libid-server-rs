@@ -34,8 +34,8 @@ pub struct Config {
     /// refused at startup, because the token route compares a request's
     /// `Origin` against this and a browser sends none of them.
     ///
-    /// The GitHub OAuth callback URL is derived as
-    /// `{BASE_URL}/api/v1/ceremony/callback` and must match the OAuth App
+    /// The registered OAuth callback URL is derived as
+    /// `{BASE_URL}{CALLBACK_ALIAS_PATH}` and must match every provider's
     /// registration exactly.
     #[arg(long, env = "BASE_URL", default_value = "http://127.0.0.1:8722")]
     pub base_url: String,
@@ -44,11 +44,36 @@ pub struct Config {
     #[arg(long, env = "NOTARY_URL", default_value = "tcp://127.0.0.1:7047")]
     pub notary_url: Url,
 
-    /// GitHub OAuth App client ID (read-only app; no GitHub App needed).
-    #[arg(long, env = "GH_OAUTH_CLIENT_ID")]
-    pub gh_oauth_client_id: String,
+    /// Comma-separated application origins admitted to read the public
+    /// ceremony configuration. Nonempty, and deployment data: it is never
+    /// inferred from a request's `Origin`, `Referer`, query or body.
+    #[arg(long, env = "ALLOWED_APP_ORIGINS")]
+    pub allowed_app_origins: String,
 
-    /// GitHub OAuth App client secret.
-    #[arg(long, env = "GH_OAUTH_CLIENT_SECRET")]
+    /// The path the providers redirect back to. The only configurable route
+    /// this service has; it serves the same document as `/ccdp/callback`.
+    #[arg(long, env = "CALLBACK_ALIAS_PATH", default_value = "/auth/v1/callback")]
+    pub callback_alias_path: String,
+
+    /// The enabled platforms, as JSON. One record per platform, each with its
+    /// public client id and one circuit per advertised ceremony version:
+    ///
+    /// ```json
+    /// [{"id":"github","clientId":"Iv1.…",
+    ///   "versions":[{"version":1,"circuitUrl":"https://…/bearer_link.json"}]}]
+    /// ```
+    ///
+    /// One record, two projections: the public configuration this service
+    /// publishes and the prover profiles its shell embeds. A separate
+    /// `GH_OAUTH_CLIENT_ID` is gone for that reason — it was a second list of
+    /// platforms, kept in step by hand.
+    #[arg(long, env = "CEREMONY_PLATFORMS")]
+    pub ceremony_platforms: String,
+
+    /// GitHub OAuth App client secret. Required exactly when the platforms
+    /// above enable `github`, and refused when they do not: it is the one
+    /// value that must never reach the public configuration, so it has no
+    /// business being set for a platform nobody can select.
+    #[arg(long, env = "GH_OAUTH_CLIENT_SECRET", default_value = "")]
     pub gh_oauth_client_secret: String,
 }

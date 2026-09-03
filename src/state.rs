@@ -22,6 +22,9 @@ pub struct AppState {
     /// route compares a request's `Origin` against it, so a value that differs
     /// from what browsers actually send refuses every legitimate call.
     pub server_origin: String,
+    /// The configured path the callback shell answers at besides
+    /// `/ccdp/callback`, and the path the providers redirect back to.
+    pub callback_alias: String,
     /// The notary this service opens its token session against, as the
     /// `host:port` a TCP connect takes.
     ///
@@ -29,9 +32,24 @@ pub struct AppState {
     /// names no host or no port stops the process from coming up rather than
     /// failing the first ceremony that reaches it.
     pub notary_addr: String,
-    /// GitHub's confidential client. The secret never leaves this process and
-    /// is never revealed in a notarized transcript.
-    pub github_oauth: OAuthCredentials,
+    /// GitHub's confidential client, when the deployment enables GitHub. The
+    /// secret never leaves this process and is never revealed in a notarized
+    /// transcript.
+    ///
+    /// `None` means the token route is not mounted at all: a path that would
+    /// answer without a secret is worse than one that is absent.
+    pub github_oauth: Option<OAuthCredentials>,
+    /// The application origins admitted to read the public configuration.
+    ///
+    /// Exact strings, canonicalised at startup the same way this service's own
+    /// origin is, because the two are compared against what a browser sends.
+    pub allowed_app_origins: Vec<String>,
+    /// The public ceremony configuration, serialized once.
+    ///
+    /// One record for every request: it carries no secret and nothing a caller
+    /// chose, so there is nothing to rebuild per request and nothing that
+    /// could differ between two of them.
+    pub ceremony_config: serde_json::Value,
     /// How many token exchanges may run at once.
     ///
     /// This is the only thing standing between an anonymous caller and as many

@@ -57,6 +57,7 @@ use serde::{
 
 use crate::{
     error::Error,
+    oauth::OAuthCredentials,
     state::AppState,
 };
 
@@ -292,8 +293,7 @@ fn b64(bytes: &[u8]) -> String {
 /// secret anywhere else the committed run would be a hole in the middle of the
 /// revealed body, and the verifier's coverage check refuses a transcript it
 /// cannot tile.
-fn token_request_body(state: &AppState, request: &TokenRequest) -> String {
-    let creds = &state.github_oauth;
+fn token_request_body(creds: &OAuthCredentials, request: &TokenRequest) -> String {
     url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", &creds.client_id)
         .append_pair("code", &request.code)
@@ -341,7 +341,7 @@ fn layout_failed(e: &ceremony::LayoutError) -> libid_tlsn::Error {
 /// answers an error object, the response layout finds no `access_token` to
 /// anchor on, and the session fails somewhere that looks like a notary fault.
 fn token_http_request(
-    state: &AppState,
+    creds: &OAuthCredentials,
     request: &TokenRequest,
 ) -> Result<hyper::Request<http_body_util::Full<bytes::Bytes>>, Error> {
     let uri: hyper::Uri = TOKEN_URL.parse().map_err(|e| Error::Config {
@@ -366,7 +366,7 @@ fn token_http_request(
         // complete.
         .header(header::CONNECTION, "close")
         .body(http_body_util::Full::new(bytes::Bytes::from(
-            token_request_body(state, request),
+            token_request_body(creds, request),
         )))
         .map_err(|e| Error::Config {
             detail: format!("token request: {e}"),
@@ -478,7 +478,12 @@ async fn exchange(
     state: &AppState,
     request: &TokenRequest,
 ) -> Result<TokenResponse, Error> {
-    let http_request = token_http_request(state, request)?;
+    // The route is mounted only where GitHub is enabled, so this is a check
+    // against the router and the state disagreeing, not against a caller.
+    let creds = state.github_oauth.as_ref().ok_or_else(|| Error::Config {
+        detail: "the token route is mounted without a GitHub client".into(),
+    })?;
+    let http_request = token_http_request(creds, request)?;
     let socket = connect_notary(&state.notary_addr).await?;
 
     // What the layout decided, kept from inside the session. The bearer's
@@ -595,11 +600,14 @@ mod tests {
         AppState {
             server_origin: "http://127.0.0.1:8722".into(),
             notary_addr: "127.0.0.1:7047".into(),
-            github_oauth: crate::oauth::OAuthCredentials {
+            allowed_app_origins: vec!["http://localhost:3000".into()],
+            ceremony_config: serde_json::Value::Null,
+            callback_alias: "/auth/v1/callback".into(),
+            github_oauth: Some(crate::oauth::OAuthCredentials {
                 client_id: "Iv1.0123456789abcdef".into(),
                 client_secret: client_secret.into(),
-                redirect_uri: "http://127.0.0.1:8722/api/v1/ceremony/callback".into(),
-            },
+                redirect_uri: "http://127.0.0.1:8722/auth/v1/callback".into(),
+            }),
             exchange_permits: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_EXCHANGES,
             )),
@@ -615,7 +623,7 @@ mod tests {
 
     /// What the session will see in the sent direction.
     fn sent(state: &AppState, request: &TokenRequest) -> Vec<u8> {
-        let body = token_request_body(state, request);
+        let body = token_request_body(state.github_oauth.as_ref().unwrap(), request);
         format!("{HEAD}content-length: {}\r\n\r\n{body}", body.len()).into_bytes()
     }
 
@@ -651,8 +659,14 @@ mod tests {
         }
         assert!(
             !revealed
-                .windows(state.github_oauth.client_secret.len())
-                .any(|w| w == state.github_oauth.client_secret.as_bytes()),
+                .windows(state.github_oauth.as_ref().unwrap().client_secret.len())
+                .any(|w| w
+                    == state
+                        .github_oauth
+                        .as_ref()
+                        .unwrap()
+                        .client_secret
+                        .as_bytes()),
             "the secret is nowhere in what the notary is shown"
         );
     }
@@ -665,7 +679,7 @@ mod tests {
     fn a_secret_carrying_form_delimiters_cannot_forge_a_field() {
         let secret = "sk&client_secret=forged&scope=admin";
         let state = state(secret);
-        let body = token_request_body(&state, &request());
+        let body = token_request_body(state.github_oauth.as_ref().unwrap(), &request());
 
         let pairs: Vec<_> = url::form_urlencoded::parse(body.as_bytes()).collect();
         assert_eq!(pairs.len(), 5, "five fields, whatever the secret contains");
@@ -798,7 +812,8 @@ mod tests {
     #[test]
     fn the_request_names_the_host_the_session_authenticates() {
         let state = state("ghs_secret");
-        let req = token_http_request(&state, &request()).unwrap();
+        let req =
+            token_http_request(state.github_oauth.as_ref().unwrap(), &request()).unwrap();
 
         assert_eq!(req.method(), "POST");
         assert_eq!(req.uri(), TOKEN_URL);

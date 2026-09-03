@@ -1,7 +1,8 @@
 //! HTTP route table. The full endpoint surface, deliberately tiny:
 //!
 //! - `GET  /health`
-//! - `POST /api/v1/ceremony/github-token`
+//! - `GET  /api/v1/ceremony/config`
+//! - `POST /api/v1/ceremony/github-token` (only when GitHub is enabled)
 //!
 //! One route does work, and it is the one a platform ceremony genuinely
 //! requires of a server: GitHub's exchange needs a client secret, and a secret
@@ -16,6 +17,7 @@
 //! REQ-PLAT-43 — an allow-list with a wildcard in it is not "only the compiled
 //! redirect-runtime origin".
 
+pub mod config;
 pub mod github_token;
 
 use std::sync::Arc;
@@ -41,12 +43,34 @@ async fn health() -> &'static str {
     "OK"
 }
 
-/// Build the route table.
-pub fn build_router() -> Router<Arc<AppState>> {
-    Router::new().route("/health", get(health)).route(
-        "/api/v1/ceremony/github-token",
-        post(github_token::github_token),
-    )
+/// The paths this service fixes. The configurable callback alias may not be
+/// any of them: `Router::route` panics on a duplicate, and a deployment would
+/// learn that by failing to start with nothing saying which setting did it.
+pub const FIXED_PATHS: [&str; 4] = [
+    "/health",
+    "/api/v1/ceremony/config",
+    "/api/v1/ceremony/github-token",
+    "/ccdp/callback",
+];
+
+/// Build the route table for this deployment.
+///
+/// It takes the state because the surface depends on it: the token route
+/// exists only where GitHub is enabled, and the callback alias is a configured
+/// path. A router that mounted a confidential route with no secret behind it
+/// would answer where it should not be found at all.
+pub fn build_router(state: &AppState) -> Router<Arc<AppState>> {
+    let mut router = Router::new()
+        .route("/health", get(health))
+        .route("/api/v1/ceremony/config", get(config::config));
+
+    if state.github_oauth.is_some() {
+        router = router.route(
+            "/api/v1/ceremony/github-token",
+            post(github_token::github_token),
+        );
+    }
+    router
 }
 
 /// The preflight answer for the one origin this service serves.

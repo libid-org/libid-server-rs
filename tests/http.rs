@@ -18,27 +18,41 @@ use libid_server_rs::{
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
+const APP_ORIGIN: &str = "http://localhost:3000";
+
 /// The state carries no signing identity: the service holds no key.
-fn state_with(permits: usize) -> Arc<AppState> {
+fn state_with(permits: usize, github: bool) -> Arc<AppState> {
+    let redirect_uri = "http://127.0.0.1:8722/auth/v1/callback";
     Arc::new(AppState {
         server_origin: "http://127.0.0.1:8722".into(),
+        callback_alias: "/auth/v1/callback".into(),
         notary_addr: "127.0.0.1:7047".into(),
-        github_oauth: libid_server_rs::oauth::OAuthCredentials {
+        allowed_app_origins: vec![APP_ORIGIN.into(), "https://wallet.example".into()],
+        ceremony_config: routes::config::record(
+            redirect_uri,
+            &libid_server_rs::deployment::platforms(
+                r#"[{"id":"github","clientId":"test-client-id",
+                     "versions":[{"version":1,
+                                  "circuitUrl":"https://a.example/v1/bearer_link.json"}]}]"#,
+            )
+            .unwrap(),
+        ),
+        github_oauth: github.then(|| libid_server_rs::oauth::OAuthCredentials {
             client_id: "test-client-id".into(),
             client_secret: "test-client-secret".into(),
-            redirect_uri: "http://127.0.0.1:8722/api/v1/ceremony/callback".into(),
-        },
+            redirect_uri: redirect_uri.into(),
+        }),
         exchange_permits: Arc::new(Semaphore::new(permits)),
     })
 }
 
 /// A state whose exchange ceiling is the default.
 fn test_state() -> Arc<AppState> {
-    state_with(routes::github_token::MAX_CONCURRENT_EXCHANGES)
+    state_with(routes::github_token::MAX_CONCURRENT_EXCHANGES, true)
 }
 
 fn app(state: Arc<AppState>) -> axum::Router {
-    routes::build_router().with_state(state)
+    routes::build_router(&state).with_state(state)
 }
 
 #[tokio::test]
@@ -142,7 +156,7 @@ async fn github_token_sheds_when_no_permit_is_free() {
         .header("origin", ORIGIN)
         .body(Body::from(valid_body()))
         .unwrap();
-    let resp = app(state_with(0)).oneshot(req).await.unwrap();
+    let resp = app(state_with(0, true)).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
@@ -181,8 +195,9 @@ async fn the_preflight_names_the_one_origin_whoever_asks() {
             .header("access-control-request-headers", "content-type")
             .body(Body::empty())
             .unwrap();
-        let app = routes::build_router()
-            .with_state(test_state())
+        let st = test_state();
+        let app = routes::build_router(&st)
+            .with_state(st)
             .layer(routes::cors_layer(ORIGIN));
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(
@@ -204,9 +219,127 @@ async fn an_unusable_configured_origin_allows_nobody() {
         .header("access-control-request-method", "POST")
         .body(Body::empty())
         .unwrap();
-    let app = routes::build_router()
-        .with_state(test_state())
+    let st = test_state();
+    let app = routes::build_router(&st)
+        .with_state(st)
         .layer(routes::cors_layer("not a header value\n"));
     let resp = app.oneshot(req).await.unwrap();
     assert!(!resp.headers().contains_key("access-control-allow-origin"));
+}
+
+// ─── the public ceremony configuration ───────────────────────────────────────
+
+async fn get_config(origin: Option<&str>, query: &str) -> axum::response::Response {
+    let mut req = Request::get(format!("/api/v1/ceremony/config{query}"));
+    if let Some(origin) = origin {
+        req = req.header("origin", origin);
+    }
+    app(test_state())
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn body_of(resp: axum::response::Response) -> serde_json::Value {
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// An admitted application is answered with its OWN origin, never a wildcard
+/// and never the list: the record is readable by the applications this
+/// deployment admits, not by the web.
+#[tokio::test]
+async fn config_answers_each_admitted_origin_with_that_exact_origin() {
+    for origin in [APP_ORIGIN, "https://wallet.example"] {
+        let resp = get_config(Some(origin), "").await;
+        assert_eq!(resp.status(), StatusCode::OK, "{origin}");
+        let h = resp.headers();
+        assert_eq!(h.get("access-control-allow-origin").unwrap(), origin);
+        assert!(h.get("access-control-allow-credentials").is_none());
+        assert_eq!(h.get("cache-control").unwrap(), "no-store");
+        assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(h.get("content-type").unwrap(), "application/json");
+    }
+}
+
+/// A caller that is not admitted gets no configuration and no allow-origin
+/// header — so it cannot read the record out of the refusal either. Absent and
+/// unlisted are answered the same way: which one it was is not the caller's
+/// business.
+#[tokio::test]
+async fn config_refuses_an_absent_or_unlisted_origin() {
+    for origin in [
+        None,
+        Some("https://evil.example"),
+        // Near misses. A browser sends none of these for an admitted page.
+        Some("http://LOCALHOST:3000"),
+        Some("http://localhost:3000/"),
+        Some("http://localhost:3001"),
+    ] {
+        let resp = get_config(origin, "").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{origin:?}");
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+        let body = body_of(resp).await;
+        assert!(
+            body.get("platforms").is_none(),
+            "{origin:?} learned nothing"
+        );
+    }
+}
+
+/// The record carries what an application needs to start a ceremony and
+/// nothing else. A secret or an admitted-origin list in here would be a
+/// deployment publishing its own configuration to every application it admits.
+#[tokio::test]
+async fn config_carries_no_secret_and_no_admitted_origin() {
+    let body = body_of(get_config(Some(APP_ORIGIN), "").await).await;
+    let object = body.as_object().unwrap();
+    let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["platforms", "redirectUri"]);
+
+    assert_eq!(
+        body["redirectUri"], "http://127.0.0.1:8722/auth/v1/callback",
+        "the record publishes the same redirect URI the token request sends"
+    );
+    assert_eq!(body["platforms"]["github"]["clientId"], "test-client-id");
+    assert_eq!(body["platforms"]["github"]["ceremonyVersions"][0], 1);
+
+    let raw = body.to_string();
+    assert!(!raw.contains("test-client-secret"));
+    assert!(!raw.contains(APP_ORIGIN));
+    assert!(
+        !raw.contains("circuitUrl"),
+        "an application selects no artifact"
+    );
+}
+
+/// The origin is decided before the query, so an unlisted caller cannot use a
+/// malformed request to tell one refusal from another.
+#[tokio::test]
+async fn config_refuses_a_query_but_reads_the_origin_first() {
+    assert_eq!(
+        get_config(Some(APP_ORIGIN), "?tenant=1").await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get_config(Some("https://evil.example"), "?tenant=1")
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+/// The confidential route exists only where a secret backs it. A path that
+/// answered without one would be worse than a path that is not there.
+#[tokio::test]
+async fn the_token_route_is_absent_when_github_is_not_enabled() {
+    let state = state_with(routes::github_token::MAX_CONCURRENT_EXCHANGES, false);
+    let req = Request::post("/api/v1/ceremony/github-token")
+        .header("content-type", "application/json")
+        .header("origin", ORIGIN)
+        .body(Body::from(valid_body()))
+        .unwrap();
+    let resp = app(state).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

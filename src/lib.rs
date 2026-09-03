@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod deployment;
 pub mod error;
 pub mod oauth;
 pub mod routes;
@@ -41,22 +42,71 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     }
     let server_origin = server_origin(&cfg.base_url)?;
 
+    let alias = callback_alias(&cfg.callback_alias_path)?;
+    // One string, three uses: the route the provider returns to, the bytes the
+    // notarized token request sends, and the `redirectUri` the public
+    // configuration publishes. Deriving all three from one place is what stops
+    // them drifting into a `redirect_uri_mismatch` nobody can see.
+    let redirect_uri = format!("{server_origin}{alias}");
+
+    let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
+    let platforms = deployment::platforms(&cfg.ceremony_platforms)?;
+
+    let github = platforms.iter().find(|p| p.is_github());
+    if github.is_some() == cfg.gh_oauth_client_secret.is_empty() {
+        return Err(Error::Config {
+            detail: if github.is_some() {
+                "CEREMONY_PLATFORMS enables github, so GH_OAUTH_CLIENT_SECRET \
+                 must be set: the exchange is confidential or it is nothing"
+            } else {
+                "GH_OAUTH_CLIENT_SECRET is set but CEREMONY_PLATFORMS enables \
+                 no github, so nothing can ever spend it"
+            }
+            .into(),
+        });
+    }
+
     Ok(Arc::new(AppState {
-        github_oauth: oauth::OAuthCredentials {
-            client_id: cfg.gh_oauth_client_id.clone(),
+        github_oauth: github.map(|p| oauth::OAuthCredentials {
+            client_id: p.client_id.clone(),
             client_secret: cfg.gh_oauth_client_secret.clone(),
-            // The registered redirect URI is the callback document this
-            // service serves, and the browser sends the same bytes back in the
-            // token request. Both sides must spell it identically or GitHub
-            // refuses the exchange.
-            redirect_uri: format!("{server_origin}/api/v1/ceremony/callback"),
-        },
+            redirect_uri: redirect_uri.clone(),
+        }),
+        ceremony_config: routes::config::record(&redirect_uri, &platforms),
+        allowed_app_origins,
         notary_addr: notary_addr(&cfg.notary_url)?,
         exchange_permits: Arc::new(Semaphore::new(
             routes::github_token::MAX_CONCURRENT_EXCHANGES,
         )),
         server_origin,
+        callback_alias: alias,
     }))
+}
+
+/// The application origins admitted to read the configuration.
+fn allowed_app_origins(list: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for (i, spelling) in list
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .enumerate()
+    {
+        let origin = canonical_origin(&format!("ALLOWED_APP_ORIGINS[{i}]"), spelling)?;
+        // Set semantics: a repeated origin is the same permission twice, not
+        // an error, and the response must not depend on how it was written.
+        if !out.contains(&origin) {
+            out.push(origin);
+        }
+    }
+    if out.is_empty() {
+        return Err(Error::Config {
+            detail: "ALLOWED_APP_ORIGINS is empty, so no application could \
+                     read the ceremony configuration"
+                .into(),
+        });
+    }
+    Ok(out)
 }
 
 /// The origin this service answers on, exactly as a browser spells it.
@@ -71,12 +121,19 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 /// at the root, so a path would say this service lives somewhere it does not
 /// serve, and the redirect URI derived from it would be one GitHub never sees.
 fn server_origin(base_url: &str) -> Result<String> {
-    let url = Url::parse(base_url).map_err(|e| Error::Config {
-        detail: format!("BASE_URL {base_url}: {e}"),
+    canonical_origin("BASE_URL", base_url)
+}
+
+/// The same reading for every origin-shaped input: this service's own, and
+/// each application origin admitted to read the configuration. One function so
+/// the two cannot be spelled by different rules and then compared.
+fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
+    let url = Url::parse(spelling).map_err(|e| Error::Config {
+        detail: format!("{field} {spelling}: {e}"),
     })?;
     let refuse = |why: &str| Error::Config {
         detail: format!(
-            "BASE_URL {base_url} {why}; it must be a bare origin, \
+            "{field} {spelling} {why}; it must be a bare origin, \
              as in https://id.example.com"
         ),
     };
@@ -96,6 +153,68 @@ fn server_origin(base_url: &str) -> Result<String> {
         return Err(refuse("carries credentials"));
     }
     Ok(url.origin().ascii_serialization())
+}
+
+/// An immutable asset URL: absolute, no query, no fragment, no credentials.
+///
+/// Immutable is the whole contract on these — a URL is never reused for
+/// different bytes — and a query or fragment is how a mutable one usually
+/// spells itself. Refusing both here means the shells embed only URLs that
+/// can honestly carry a year-long cache.
+pub(crate) fn immutable_url(field: &str, spelling: &str) -> Result<()> {
+    let url = Url::parse(spelling).map_err(|e| Error::Config {
+        detail: format!("{field} {spelling}: {e}"),
+    })?;
+    let refuse = |why: &str| Error::Config {
+        detail: format!("{field} {spelling} {why}"),
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(refuse("is not http or https"));
+    }
+    if url.host().is_none() {
+        return Err(refuse("names no host"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(refuse(
+            "carries a query or fragment, so it is not immutable",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(refuse("carries credentials"));
+    }
+    Ok(())
+}
+
+/// The path the provider redirects back to, and the only configurable route.
+///
+/// It is mounted as a second name for the callback shell, so a spelling axum
+/// reads as a pattern -- anything with braces in it -- would quietly turn one
+/// document into a wildcard. A path colliding with a fixed route is worse
+/// still: `Router::route` panics, and a deployment learns that by not
+/// starting, with no line saying which setting did it.
+fn callback_alias(path: &str) -> Result<String> {
+    let refuse = |why: &str| Error::Config {
+        detail: format!("CALLBACK_ALIAS_PATH {path} {why}"),
+    };
+    if !path.starts_with('/') {
+        return Err(refuse("does not begin with `/`"));
+    }
+    if path.contains(['{', '}']) {
+        return Err(refuse(
+            "contains a brace, which axum reads as a path pattern",
+        ));
+    }
+    if path.contains(['?', '#'])
+        || path.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(refuse(
+            "carries a query, fragment, whitespace or control byte",
+        ));
+    }
+    if routes::FIXED_PATHS.contains(&path) {
+        return Err(refuse("collides with a route this service already serves"));
+    }
+    Ok(path.to_owned())
 }
 
 /// The `host:port` of the notary, taken from its configured URL.
@@ -120,8 +239,12 @@ mod tests {
     fn config(args: &[&str]) -> config::Config {
         let mut argv = vec![
             "libid-server-rs",
-            "--gh-oauth-client-id",
-            "Iv1.0123456789abcdef",
+            "--allowed-app-origins",
+            "https://app.example",
+            "--ceremony-platforms",
+            r#"[{"id":"github","clientId":"Iv1.0123456789abcdef",
+                 "versions":[{"version":1,
+                              "circuitUrl":"https://a.example/v1/bearer_link.json"}]}]"#,
             "--gh-oauth-client-secret",
             "ghs_secret",
         ];
@@ -129,16 +252,17 @@ mod tests {
         <config::Config as clap::Parser>::parse_from(argv)
     }
 
-    /// The redirect URI is derived, not configured, and GitHub refuses an
+    /// The redirect URI is derived, not configured, and a provider refuses an
     /// exchange whose two spellings differ. So it has to be exactly the
-    /// callback route under the configured base URL.
+    /// configured callback alias under the configured base URL — the same
+    /// string the public configuration publishes and the alias route mounts.
     #[test]
     fn the_redirect_uri_is_the_callback_route_under_the_base_url() {
         let state = build_state(&config(&["--base-url", "https://id.example/"])).unwrap();
         assert_eq!(state.server_origin, "https://id.example");
         assert_eq!(
-            state.github_oauth.redirect_uri,
-            "https://id.example/api/v1/ceremony/callback"
+            state.github_oauth.as_ref().unwrap().redirect_uri,
+            "https://id.example/auth/v1/callback"
         );
     }
 
@@ -201,8 +325,8 @@ mod tests {
         let state =
             build_state(&config(&["--base-url", "https://ID.example.com:443/"])).unwrap();
         assert_eq!(
-            state.github_oauth.redirect_uri,
-            "https://id.example.com/api/v1/ceremony/callback"
+            state.github_oauth.as_ref().unwrap().redirect_uri,
+            "https://id.example.com/auth/v1/callback"
         );
     }
 
