@@ -1601,7 +1601,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libid-ceremony"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=193bf242bdcbf5918245c4d239b51f0a669f1e91#193bf242bdcbf5918245c4d239b51f0a669f1e91"
+source = "git+https://github.com/libid-org/libid-rs?rev=4e89f55ccc6036b824b4ece3c1ae950d59cece53#4e89f55ccc6036b824b4ece3c1ae950d59cece53"
 dependencies = [
  "bincode 2.0.1",
  "libid-crypto",
@@ -1611,7 +1611,7 @@ dependencies = [
 [[package]]
 name = "libid-crypto"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=193bf242bdcbf5918245c4d239b51f0a669f1e91#193bf242bdcbf5918245c4d239b51f0a669f1e91"
+source = "git+https://github.com/libid-org/libid-rs?rev=4e89f55ccc6036b824b4ece3c1ae950d59cece53#4e89f55ccc6036b824b4ece3c1ae950d59cece53"
 dependencies = [
  "hex",
  "k256",
@@ -1647,7 +1647,7 @@ dependencies = [
 [[package]]
 name = "libid-tlsn"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=193bf242bdcbf5918245c4d239b51f0a669f1e91#193bf242bdcbf5918245c4d239b51f0a669f1e91"
+source = "git+https://github.com/libid-org/libid-rs?rev=4e89f55ccc6036b824b4ece3c1ae950d59cece53#4e89f55ccc6036b824b4ece3c1ae950d59cece53"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -1665,7 +1665,7 @@ dependencies = [
 [[package]]
 name = "libid-transcript"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=193bf242bdcbf5918245c4d239b51f0a669f1e91#193bf242bdcbf5918245c4d239b51f0a669f1e91"
+source = "git+https://github.com/libid-org/libid-rs?rev=4e89f55ccc6036b824b4ece3c1ae950d59cece53#4e89f55ccc6036b824b4ece3c1ae950d59cece53"
 dependencies = [
  "httparse",
  "serde",

@@ -1,7 +1,7 @@
 //! HTTP route table. The full endpoint surface, deliberately tiny:
 //!
 //! - `GET  /health`
-//! - `POST /oauth/github/token-exchange`
+//! - `POST /api/v1/ceremony/github-token`
 //!
 //! One route does work, and it is the one a platform ceremony genuinely
 //! requires of a server: GitHub's exchange needs a client secret, and a secret
@@ -44,7 +44,7 @@ async fn health() -> &'static str {
 /// Build the route table.
 pub fn build_router() -> Router<Arc<AppState>> {
     Router::new().route("/health", get(health)).route(
-        "/oauth/github/token-exchange",
+        "/api/v1/ceremony/github-token",
         post(github_token::github_token),
     )
 }

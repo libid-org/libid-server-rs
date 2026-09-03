@@ -63,7 +63,7 @@ const ORIGIN: &str = "http://127.0.0.1:8722";
 const VERIFIER: &str = "iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I";
 
 async fn post_token(origin: Option<&str>, body: String) -> axum::response::Response {
-    let mut req = Request::post("/oauth/github/token-exchange")
+    let mut req = Request::post("/api/v1/ceremony/github-token")
         .header("content-type", "application/json");
     if let Some(origin) = origin {
         req = req.header("origin", origin);
@@ -75,7 +75,7 @@ async fn post_token(origin: Option<&str>, body: String) -> axum::response::Respo
 }
 
 fn valid_body() -> String {
-    format!(r#"{{"schema":1,"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#)
+    format!(r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#)
 }
 
 #[tokio::test]
@@ -102,7 +102,7 @@ async fn github_token_refuses_a_request_with_no_origin() {
 #[tokio::test]
 async fn github_token_refuses_a_body_that_tries_to_steer_the_exchange() {
     let body = format!(
-        r#"{{"schema":1,"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"https://evil.example/cb"}}"#
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"https://evil.example/cb"}}"#
     );
     let resp = post_token(Some(ORIGIN), body).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -117,7 +117,7 @@ async fn github_token_refuses_a_malformed_body() {
 #[tokio::test]
 async fn github_token_refuses_an_over_long_code() {
     let body = format!(
-        r#"{{"schema":1,"code":"{}","codeVerifier":"{VERIFIER}"}}"#,
+        r#"{{"code":"{}","codeVerifier":"{VERIFIER}"}}"#,
         "a".repeat(4096)
     );
     let resp = post_token(Some(ORIGIN), body).await;
@@ -126,7 +126,7 @@ async fn github_token_refuses_an_over_long_code() {
 
 #[tokio::test]
 async fn github_token_refuses_a_verifier_of_the_wrong_length() {
-    let body = r#"{"schema":1,"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
+    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
     let resp = post_token(Some(ORIGIN), body.into()).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
@@ -137,7 +137,7 @@ async fn github_token_refuses_a_verifier_of_the_wrong_length() {
 /// held requests are the same exhaustion with a longer fuse.
 #[tokio::test]
 async fn github_token_sheds_when_no_permit_is_free() {
-    let req = Request::post("/oauth/github/token-exchange")
+    let req = Request::post("/api/v1/ceremony/github-token")
         .header("content-type", "application/json")
         .header("origin", ORIGIN)
         .body(Body::from(valid_body()))
@@ -155,22 +155,14 @@ async fn github_token_checks_the_origin_before_the_body() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// A caller naming another revision is answered, not guessed at. A future
-/// schema changes what the fields mean, and reading new fields under old rules
-/// is how two components agree on nothing while both believe they succeeded.
+/// The route carries no schema member — its path already versions the
+/// transport — so one offered is an additional field like any other, and the
+/// contract refuses it rather than ignoring it.
 #[tokio::test]
-async fn github_token_refuses_a_schema_it_does_not_speak() {
+async fn github_token_refuses_a_body_carrying_a_schema() {
     let body = format!(
-        r#"{{"schema":2,"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#
+        r#"{{"schema":1,"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#
     );
-    let resp = post_token(Some(ORIGIN), body).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-/// And an absent one is not read as the current one.
-#[tokio::test]
-async fn github_token_refuses_a_body_with_no_schema() {
-    let body = format!(r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#);
     let resp = post_token(Some(ORIGIN), body).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
@@ -183,7 +175,7 @@ async fn the_preflight_names_the_one_origin_whoever_asks() {
     for origin in [ORIGIN, "https://evil.example"] {
         let req = Request::builder()
             .method("OPTIONS")
-            .uri("/oauth/github/token-exchange")
+            .uri("/api/v1/ceremony/github-token")
             .header("origin", origin)
             .header("access-control-request-method", "POST")
             .header("access-control-request-headers", "content-type")
@@ -207,7 +199,7 @@ async fn the_preflight_names_the_one_origin_whoever_asks() {
 async fn an_unusable_configured_origin_allows_nobody() {
     let req = Request::builder()
         .method("OPTIONS")
-        .uri("/oauth/github/token-exchange")
+        .uri("/api/v1/ceremony/github-token")
         .header("origin", ORIGIN)
         .header("access-control-request-method", "POST")
         .body(Body::empty())

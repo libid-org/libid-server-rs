@@ -105,24 +105,32 @@ const RECORD_TIMEOUT: Duration = Duration::from_secs(30);
 /// service, and of the OAuth app's standing with GitHub, to consume.
 pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
 
-/// The one shape of this exchange that exists. A caller naming another is
-/// answered rather than guessed at: a future revision changes what the fields
-/// mean, and reading new fields under old rules is how two components agree on
-/// nothing while both believing they succeeded.
-const SCHEMA_V1: u8 = 1;
-
 /// What the browser sends. Nothing else: this service uses only its own
 /// compiled client, secret, redirect URI, endpoint and notary, and accepts no
 /// caller-selected action, client, redirect, endpoint or return URL.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TokenRequestBody {
-    /// Must be [`SCHEMA_V1`].
-    schema: u8,
     /// The authorization code the callback captured.
     code: String,
     /// The PKCE verifier the browser derived for this ceremony.
     code_verifier: String,
+}
+
+/// The notary's attestation of the exchange: the exact bytes it signed, and
+/// the signature over them.
+///
+/// Two members, not one string. The record and the signature are bounded
+/// separately — the data to 2 MiB, the signature to the 65 bytes a notary
+/// signature is — and a single blob would have to be split before either
+/// bound could be applied.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AttestationBody {
+    /// The section 9.1 record, byte for byte as the notary produced it.
+    attested_data: String,
+    /// EIP-191 over its keccak256 digest.
+    signature: String,
 }
 
 /// What the browser gets back.
@@ -134,13 +142,10 @@ pub struct TokenRequestBody {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TokenResponseBody {
-    /// Always [`SCHEMA_V1`].
-    schema: u8,
     /// The bearer, which the attestation commits to rather than discloses.
     access_token: String,
-    /// The section 9.1 record and the notary's signature over it, in the one
-    /// string the interface gives them — see `TokenAttestation::encode`.
-    token_attestation: String,
+    /// The notary's attestation of the session that produced it.
+    token_attestation: AttestationBody,
     /// What opens the attestation's committed bearer range.
     bearer_opening: String,
 }
@@ -204,7 +209,7 @@ impl IntoResponse for TokenError {
     }
 }
 
-/// `POST /oauth/github/token-exchange`.
+/// `POST /api/v1/ceremony/github-token`.
 pub async fn github_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -228,12 +233,6 @@ pub async fn github_token(
     // Malformed JSON fails before a session is opened and before the secret is
     // spent.
     let Json(body) = body.map_err(|e| TokenError::bad_request(e.body_text()))?;
-    if body.schema != SCHEMA_V1 {
-        return Err(TokenError::bad_request(format!(
-            "unknown schema {}; this service speaks {SCHEMA_V1}",
-            body.schema
-        )));
-    }
     let request = TokenRequest {
         code: body.code,
         code_verifier: body.code_verifier,
@@ -267,9 +266,11 @@ pub async fn github_token(
         StatusCode::OK,
         [(header::CACHE_CONTROL, "no-store")],
         Json(TokenResponseBody {
-            schema: SCHEMA_V1,
             access_token: response.access_token,
-            token_attestation: b64(&response.token_attestation.encode()),
+            token_attestation: AttestationBody {
+                attested_data: b64(&response.token_attestation.attested_data),
+                signature: b64(&response.token_attestation.signature),
+            },
             bearer_opening: b64(&response.bearer_opening),
         }),
     )
@@ -278,8 +279,8 @@ pub async fn github_token(
 
 /// How every byte string in the response is spelled: unpadded URL-safe base64.
 ///
-/// Both byte strings of the response are spelled this way, and a browser that
-/// decodes one differently from the other gets a proof that will not verify.
+/// All three byte strings of the response are spelled this way, and a browser
+/// that decodes one differently from another gets a proof that will not verify.
 /// The bearer is not among them: it is a string GitHub chose, not bytes.
 fn b64(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
