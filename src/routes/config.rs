@@ -35,8 +35,14 @@ use serde_json::{
     Value,
 };
 
+use bytes::Bytes;
+
 use crate::{
     deployment::PlatformProfile,
+    error::{
+        Error,
+        Result,
+    },
     state::AppState,
 };
 
@@ -66,6 +72,19 @@ pub fn record(
         "ccdpOrigin": ccdp_origin,
         "platforms": Value::Object(by_id),
     })
+}
+
+/// The record as the bytes it is served in, serialized once at startup.
+pub fn frozen(
+    redirect_uri: &str,
+    ccdp_origin: &str,
+    platforms: &[PlatformProfile],
+) -> Result<Bytes> {
+    serde_json::to_vec(&record(redirect_uri, ccdp_origin, platforms))
+        .map(Bytes::from)
+        .map_err(|e| Error::Config {
+            detail: format!("the ceremony configuration does not serialize: {e}"),
+        })
 }
 
 /// `GET /api/v1/ceremony/config`.
@@ -100,10 +119,11 @@ pub async fn config(
             // deployment admits. No credentials are permitted with it.
             (header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.to_owned()),
             (header::VARY, header::ORIGIN.to_string()),
+            (header::CONTENT_TYPE, "application/json".into()),
             (header::CACHE_CONTROL, "no-store".into()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
         ],
-        Json(state.ceremony_config.clone()),
+        state.ceremony_config.clone(),
     )
         .into_response()
 }

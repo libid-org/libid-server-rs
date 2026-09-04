@@ -39,11 +39,14 @@ pub async fn callback(State(state): State<Arc<AppState>>) -> Response {
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::CACHE_CONTROL, "no-store"),
             (header::REFERRER_POLICY, "no-referrer"),
-            (
-                header::CONTENT_SECURITY_POLICY,
-                state.callback_shell.csp.as_str(),
-            ),
         ],
+        // Set once at startup; serving it is a reference-count bump, not a
+        // parse. It rides separately because it is already a header value
+        // while the rest are static strings.
+        [(
+            header::CONTENT_SECURITY_POLICY,
+            state.callback_shell.csp.clone(),
+        )],
         state.callback_shell.body.clone(),
     )
         .into_response()

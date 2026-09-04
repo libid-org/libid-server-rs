@@ -49,12 +49,13 @@ pub struct AppState {
     /// Exact strings, canonicalised at startup the same way this service's own
     /// origin is, because the two are compared against what a browser sends.
     pub allowed_app_origins: Vec<String>,
-    /// The public ceremony configuration, serialized once.
+    /// The public ceremony configuration, serialized once, as the exact bytes
+    /// every admitted caller receives.
     ///
     /// One record for every request: it carries no secret and nothing a caller
     /// chose, so there is nothing to rebuild per request and nothing that
-    /// could differ between two of them.
-    pub ceremony_config: serde_json::Value,
+    /// could differ between two of them -- and nothing to re-serialize either.
+    pub ceremony_config: bytes::Bytes,
     /// How many token exchanges may run at once.
     ///
     /// This is the only thing standing between an anonymous caller and as many

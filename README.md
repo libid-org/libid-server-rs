@@ -187,7 +187,9 @@ is not that rotator either.
 docker run --rm -p 8722:8722 \
   -e BASE_URL=https://handles.example.com \
   -e NOTARY_URL=tcp://notary.example.com:7047 \
-  -e GH_OAUTH_CLIENT_ID=... \
+  -e ALLOWED_APP_ORIGINS=https://app.example.com \
+  -e CCDP_ORIGIN=https://ccdp.lib.id \
+  -e CEREMONY_PLATFORMS='[{"id":"github","clientId":"Iv1....","versions":[1]}]' \
   -e GH_OAUTH_CLIENT_SECRET=... \
   ghcr.io/libid-org/libid-server-rs:latest
 ```

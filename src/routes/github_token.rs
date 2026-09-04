@@ -602,12 +602,12 @@ mod tests {
             server_origin: "http://127.0.0.1:8722".into(),
             notary_addr: "127.0.0.1:7047".into(),
             allowed_app_origins: vec!["http://localhost:3000".into()],
-            ceremony_config: serde_json::Value::Null,
+            ceremony_config: bytes::Bytes::new(),
             callback_path: "/auth/callback".into(),
             ccdp_origin: "https://ccdp.example".into(),
             callback_shell: crate::shell::RenderedShell {
-                body: String::new(),
-                csp: String::new(),
+                body: bytes::Bytes::new(),
+                csp: axum::http::HeaderValue::from_static("default-src 'none'"),
             },
             github_oauth: Some(crate::oauth::OAuthCredentials {
                 client_id: "Iv1.0123456789abcdef".into(),

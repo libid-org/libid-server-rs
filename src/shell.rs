@@ -22,7 +22,13 @@ use sha2::{
     Sha256,
 };
 
-use crate::error::Result;
+use axum::http::HeaderValue;
+use bytes::Bytes;
+
+use crate::error::{
+    Error,
+    Result,
+};
 
 /// The bootstrap. `__CCDP_ORIGIN__`, `__ORIGINS__` and `__VERSIONS__` are
 /// JSON islands; `__OVERRIDES__` is the per-version input override map.
@@ -31,11 +37,14 @@ const BOOTSTRAP: &str = include_str!("shells/callback.js");
 /// The finished document: the exact bytes, and the policy they are served
 /// under.
 pub struct RenderedShell {
-    /// The document, rendered once.
-    pub body: String,
+    /// The document, rendered once. `Bytes`, so serving it is a reference
+    /// count and not a copy: the contract's "one document" is one allocation
+    /// for the life of the process, not one per request.
+    pub body: Bytes,
     /// Its `Content-Security-Policy`, carrying the hash of the bootstrap the
-    /// body actually contains.
-    pub csp: String,
+    /// body actually contains. Parsed into a header value once, here, so no
+    /// request pays for -- or can fail -- that parse.
+    pub csp: HeaderValue,
 }
 
 /// What the shell embeds.
@@ -98,8 +107,11 @@ pub fn callback(inputs: &ShellInputs<'_>) -> Result<RenderedShell> {
     ]
     .join("; ");
 
+    let csp = HeaderValue::from_str(&csp).map_err(|e| Error::Config {
+        detail: format!("the callback shell's CSP is not a header value: {e}"),
+    })?;
     Ok(RenderedShell {
-        body: document(&script),
+        body: Bytes::from(document(&script)),
         csp,
     })
 }
@@ -176,14 +188,25 @@ mod tests {
         vec!["https://app.example".into()]
     }
 
-    fn render(origins: &[String], style_hash: &str) -> RenderedShell {
-        callback(&ShellInputs {
+    /// The rendered shell, with its bytes readable as text and its policy as
+    /// the string the tests inspect.
+    struct Rendered {
+        body: String,
+        csp: String,
+    }
+
+    fn render(origins: &[String], style_hash: &str) -> Rendered {
+        let shell = callback(&ShellInputs {
             ccdp_origin: "https://ccdp.example",
             supported_versions: &[1],
             allowed_app_origins: origins,
             style_hash,
         })
-        .unwrap()
+        .unwrap();
+        Rendered {
+            body: String::from_utf8(shell.body.to_vec()).unwrap(),
+            csp: shell.csp.to_str().unwrap().to_owned(),
+        }
     }
 
     /// The one property the whole shell rests on: the CSP names the hash of

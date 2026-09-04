@@ -75,7 +75,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             client_secret: cfg.gh_oauth_client_secret.clone(),
             redirect_uri: redirect_uri.clone(),
         }),
-        ceremony_config: routes::config::record(&redirect_uri, &ccdp_origin, &platforms),
+        ceremony_config: routes::config::frozen(&redirect_uri, &ccdp_origin, &platforms)?,
         callback_shell: shell::callback(&shell::ShellInputs {
             ccdp_origin: &ccdp_origin,
             supported_versions: &ccdp_versions,

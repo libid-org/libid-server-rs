@@ -31,14 +31,15 @@ fn state_with(permits: usize, github: bool) -> Arc<AppState> {
         callback_path: "/auth/callback".into(),
         ccdp_origin: CCDP_ORIGIN.into(),
         notary_addr: "127.0.0.1:7047".into(),
-        ceremony_config: routes::config::record(
+        ceremony_config: routes::config::frozen(
             redirect_uri,
             CCDP_ORIGIN,
             &libid_server_rs::deployment::platforms(
                 r#"[{"id":"github","clientId":"test-client-id","versions":[1]}]"#,
             )
             .unwrap(),
-        ),
+        )
+        .unwrap(),
         callback_shell: libid_server_rs::shell::callback(
             &libid_server_rs::shell::ShellInputs {
                 ccdp_origin: CCDP_ORIGIN,
