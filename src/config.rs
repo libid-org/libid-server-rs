@@ -34,8 +34,11 @@ pub struct Config {
     /// refused at startup, because the token route compares a request's
     /// `Origin` against this and a browser sends none of them.
     ///
+    /// HTTPS, unless the host is loopback: the bridge origin is a code-supply
+    /// boundary for the callback shell, and a plaintext one is no boundary.
+    ///
     /// The registered OAuth callback URL is derived as
-    /// `{BASE_URL}{CALLBACK_ALIAS_PATH}` and must match every provider's
+    /// `{BASE_URL}{CALLBACK_PATH}` and must match every provider's
     /// registration exactly.
     #[arg(long, env = "BASE_URL", default_value = "http://127.0.0.1:8722")]
     pub base_url: String,
@@ -50,23 +53,43 @@ pub struct Config {
     #[arg(long, env = "ALLOWED_APP_ORIGINS")]
     pub allowed_app_origins: String,
 
-    /// The path the providers redirect back to. The only configurable route
-    /// this service has; it serves the same document as `/ccdp/callback`.
-    #[arg(long, env = "CALLBACK_ALIAS_PATH", default_value = "/auth/v1/callback")]
-    pub callback_alias_path: String,
+    /// The path the providers redirect back to, and the one route whose name
+    /// a deployment chooses. There is no alias and no redirect: every enabled
+    /// platform registers this exact URL.
+    #[arg(long, env = "CALLBACK_PATH", default_value = "/auth/callback")]
+    pub callback_path: String,
+
+    /// The CCDP Distribution this bridge selects: one canonical HTTPS origin
+    /// that serves the Callback module the shell imports and everything the
+    /// browser runs after it. Published in the configuration and embedded in
+    /// the shell. It names no artifact, circuit or notary.
+    #[arg(long, env = "CCDP_ORIGIN")]
+    pub ccdp_origin: String,
+
+    /// The closed list of CCDP versions whose Callback the shell may import,
+    /// comma-separated. A version the distribution does not serve is a
+    /// ceremony that fails after clearing its return.
+    #[arg(long, env = "CCDP_SUPPORTED_VERSIONS", default_value = "1")]
+    pub ccdp_supported_versions: String,
+
+    /// The package-published CSP hash of the Callback stylesheet, as
+    /// `sha256-…`. Empty means `style-src 'none'`: a shell whose stylesheet
+    /// cannot be named renders unstyled rather than admit any stylesheet.
+    #[arg(long, env = "CALLBACK_STYLE_HASH", default_value = "")]
+    pub callback_style_hash: String,
 
     /// The enabled platforms, as JSON. One record per platform, each with its
-    /// public client id and one circuit per advertised ceremony version:
+    /// public client id and its advertised ceremony versions:
     ///
     /// ```json
-    /// [{"id":"github","clientId":"Iv1.…",
-    ///   "versions":[{"version":1,"circuitUrl":"https://…/bearer_link.json"}]}]
+    /// [{"id":"github","clientId":"Iv1.…","versions":[1]}]
     /// ```
     ///
-    /// One record, two projections: the public configuration this service
-    /// publishes and the prover profiles its shell embeds. A separate
-    /// `GH_OAUTH_CLIENT_ID` is gone for that reason — it was a second list of
-    /// platforms, kept in step by hand.
+    /// One record, one projection here: the public configuration. The prover
+    /// profiles live on the CCDP Distribution, which pins its own circuits; a
+    /// bridge advertises only pairs that distribution serves. A separate
+    /// `GH_OAUTH_CLIENT_ID` is gone — it was a second list of platforms, kept
+    /// in step by hand.
     #[arg(long, env = "CEREMONY_PLATFORMS")]
     pub ceremony_platforms: String,
 

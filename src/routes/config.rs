@@ -42,23 +42,30 @@ use crate::{
 
 /// The record this route serves, built once from the enabled set.
 ///
-/// This is one of the two projections of that set — the other is the prover
-/// profiles the shell embeds. What separates them is exactly what a public
-/// record may carry: the client id and the versions travel, the circuit URL
-/// does not, because an application selects a platform and a version and never
-/// an artifact.
-pub fn record(redirect_uri: &str, platforms: &[PlatformProfile]) -> Value {
+/// The client id and the versions travel; nothing about artifacts does,
+/// because an application selects a platform and a version and never an
+/// artifact. The CCDP origin travels too: it is where the application sends the
+/// popup, and the one origin whose Callback this bridge's shell will import.
+pub fn record(
+    redirect_uri: &str,
+    ccdp_origin: &str,
+    platforms: &[PlatformProfile],
+) -> Value {
     let mut by_id = Map::new();
     for p in platforms {
         by_id.insert(
             p.id.clone(),
             json!({
                 "clientId": p.client_id,
-                "ceremonyVersions": p.versions.iter().map(|v| v.version).collect::<Vec<_>>(),
+                "ceremonyVersions": p.versions,
             }),
         );
     }
-    json!({ "redirectUri": redirect_uri, "platforms": Value::Object(by_id) })
+    json!({
+        "redirectUri": redirect_uri,
+        "ccdpOrigin": ccdp_origin,
+        "platforms": Value::Object(by_id),
+    })
 }
 
 /// `GET /api/v1/ceremony/config`.

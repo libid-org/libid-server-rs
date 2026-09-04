@@ -22,9 +22,14 @@ pub struct AppState {
     /// route compares a request's `Origin` against it, so a value that differs
     /// from what browsers actually send refuses every legitimate call.
     pub server_origin: String,
-    /// The configured path the callback shell answers at besides
-    /// `/ccdp/callback`, and the path the providers redirect back to.
-    pub callback_alias: String,
+    /// The configured path the providers redirect back to, where the callback
+    /// shell answers.
+    pub callback_path: String,
+    /// The CCDP Distribution this bridge selects. The token route admits this
+    /// origin and no other: the prover that calls it runs there.
+    pub ccdp_origin: String,
+    /// The callback document, rendered once with its finished policy.
+    pub callback_shell: crate::shell::RenderedShell,
     /// The notary this service opens its token session against, as the
     /// `host:port` a TCP connect takes.
     ///

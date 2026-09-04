@@ -19,24 +19,36 @@ use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
 const APP_ORIGIN: &str = "http://localhost:3000";
+const CCDP_ORIGIN: &str = "https://ccdp.example";
 
 /// The state carries no signing identity: the service holds no key.
 fn state_with(permits: usize, github: bool) -> Arc<AppState> {
-    let redirect_uri = "http://127.0.0.1:8722/auth/v1/callback";
+    let redirect_uri = "http://127.0.0.1:8722/auth/callback";
+    let allowed_app_origins: Vec<String> =
+        vec![APP_ORIGIN.into(), "https://wallet.example".into()];
     Arc::new(AppState {
         server_origin: "http://127.0.0.1:8722".into(),
-        callback_alias: "/auth/v1/callback".into(),
+        callback_path: "/auth/callback".into(),
+        ccdp_origin: CCDP_ORIGIN.into(),
         notary_addr: "127.0.0.1:7047".into(),
-        allowed_app_origins: vec![APP_ORIGIN.into(), "https://wallet.example".into()],
         ceremony_config: routes::config::record(
             redirect_uri,
+            CCDP_ORIGIN,
             &libid_server_rs::deployment::platforms(
-                r#"[{"id":"github","clientId":"test-client-id",
-                     "versions":[{"version":1,
-                                  "circuitUrl":"https://a.example/v1/bearer_link.json"}]}]"#,
+                r#"[{"id":"github","clientId":"test-client-id","versions":[1]}]"#,
             )
             .unwrap(),
         ),
+        callback_shell: libid_server_rs::shell::callback(
+            &libid_server_rs::shell::ShellInputs {
+                ccdp_origin: CCDP_ORIGIN,
+                supported_versions: &[1],
+                allowed_app_origins: &allowed_app_origins,
+                style_hash: "",
+            },
+        )
+        .unwrap(),
+        allowed_app_origins,
         github_oauth: github.then(|| libid_server_rs::oauth::OAuthCredentials {
             client_id: "test-client-id".into(),
             client_secret: "test-client-secret".into(),
@@ -73,7 +85,7 @@ async fn health_is_ok() {
 // and must not spend the client secret. That they can be driven at all without
 // a notary listening is the evidence.
 
-const ORIGIN: &str = "http://127.0.0.1:8722";
+const ORIGIN: &str = CCDP_ORIGIN;
 const VERIFIER: &str = "iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I";
 
 async fn post_token(origin: Option<&str>, body: String) -> axum::response::Response {
@@ -181,12 +193,18 @@ async fn github_token_refuses_a_body_carrying_a_schema() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// REQ-PLAT-43A: the preflight is answered, and REQ-PLAT-43 fixes what it is
-/// answered with — one compiled origin. The layer never echoes the caller's,
-/// so a page elsewhere is told it is not allowed, whoever asked.
+/// The prover runs on the CCDP Distribution and calls this route cross-origin,
+/// so the preflight is answered — naming exactly that origin, with `POST` and
+/// `Content-Type` and no credentials, and with no ceremony data in it. A page
+/// anywhere else, this bridge's own origin included, is told the same thing,
+/// which for it is a refusal.
 #[tokio::test]
-async fn the_preflight_names_the_one_origin_whoever_asks() {
-    for origin in [ORIGIN, "https://evil.example"] {
+async fn the_token_preflight_is_answered_for_the_ccdp_origin_alone() {
+    for (origin, admitted) in [
+        (CCDP_ORIGIN, true),
+        ("http://127.0.0.1:8722", false),
+        ("https://evil.example", false),
+    ] {
         let req = Request::builder()
             .method("OPTIONS")
             .uri("/api/v1/ceremony/github-token")
@@ -195,36 +213,43 @@ async fn the_preflight_names_the_one_origin_whoever_asks() {
             .header("access-control-request-headers", "content-type")
             .body(Body::empty())
             .unwrap();
-        let st = test_state();
-        let app = routes::build_router(&st)
-            .with_state(st)
-            .layer(routes::cors_layer(ORIGIN));
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.headers().get("access-control-allow-origin").unwrap(),
-            ORIGIN,
-            "asked by {origin}"
+        let resp = app(test_state()).oneshot(req).await.unwrap();
+        let h = resp.headers();
+        // The layer never echoes the caller. It names the one configured
+        // origin whoever asks, and a browser anywhere else compares that
+        // against its own origin and refuses on its side.
+        assert_eq!(h.get("access-control-allow-origin").unwrap(), CCDP_ORIGIN);
+        if !admitted {
+            assert_ne!(h.get("access-control-allow-origin").unwrap(), origin);
+        }
+        let methods = h
+            .get("access-control-allow-methods")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(methods.contains("POST"), "{methods}");
+        let headers = h
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            headers.to_ascii_lowercase().contains("content-type"),
+            "{headers}"
         );
+        assert!(h.get("access-control-allow-credentials").is_none());
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.is_empty(), "a preflight carries no ceremony data");
     }
 }
 
-/// A configured origin no header can carry produces a layer that allows
-/// nothing, rather than one that allows everything.
+/// The origin gate on the POST is the CCDP origin, and specifically NOT this
+/// bridge's own: nothing on the bridge origin ever calls this route, so a
+/// request claiming to be from it is a request claiming to be from nowhere.
 #[tokio::test]
-async fn an_unusable_configured_origin_allows_nobody() {
-    let req = Request::builder()
-        .method("OPTIONS")
-        .uri("/api/v1/ceremony/github-token")
-        .header("origin", ORIGIN)
-        .header("access-control-request-method", "POST")
-        .body(Body::empty())
-        .unwrap();
-    let st = test_state();
-    let app = routes::build_router(&st)
-        .with_state(st)
-        .layer(routes::cors_layer("not a header value\n"));
-    let resp = app.oneshot(req).await.unwrap();
-    assert!(!resp.headers().contains_key("access-control-allow-origin"));
+async fn github_token_admits_the_ccdp_origin_and_not_the_bridges_own() {
+    let resp = post_token(Some("http://127.0.0.1:8722"), valid_body()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 // ─── the public ceremony configuration ───────────────────────────────────────
@@ -296,10 +321,11 @@ async fn config_carries_no_secret_and_no_admitted_origin() {
     let object = body.as_object().unwrap();
     let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["platforms", "redirectUri"]);
+    assert_eq!(keys, ["ccdpOrigin", "platforms", "redirectUri"]);
+    assert_eq!(body["ccdpOrigin"], CCDP_ORIGIN);
 
     assert_eq!(
-        body["redirectUri"], "http://127.0.0.1:8722/auth/v1/callback",
+        body["redirectUri"], "http://127.0.0.1:8722/auth/callback",
         "the record publishes the same redirect URI the token request sends"
     );
     assert_eq!(body["platforms"]["github"]["clientId"], "test-client-id");
@@ -342,4 +368,109 @@ async fn the_token_route_is_absent_when_github_is_not_enabled() {
         .unwrap();
     let resp = app(state).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ─── the callback shell ──────────────────────────────────────────────────────
+
+async fn get_shell(path: &str, headers: &[(&str, &str)]) -> axum::response::Response {
+    let mut req = Request::get(path);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    app(test_state())
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+/// The provider brings the return in the query; the shell must not care, and
+/// no `Origin` or `Referer` may change a byte of it. One document, whatever
+/// arrives.
+#[tokio::test]
+async fn the_callback_shell_is_the_same_bytes_whatever_the_request() {
+    /// Status, sorted headers, body -- everything a response is.
+    type Observed = (StatusCode, Vec<(String, String)>, bytes::Bytes);
+    let mut seen: Vec<Observed> = Vec::new();
+    for (path, headers) in [
+        ("/auth/callback", vec![]),
+        ("/auth/callback?code=abc&state=v1.9e1f", vec![]),
+        ("/auth/callback?error=access_denied&state=v1.9e1f", vec![]),
+        ("/auth/callback", vec![("origin", "https://evil.example")]),
+        (
+            "/auth/callback",
+            vec![("referer", "https://github.com/login")],
+        ),
+        ("/auth/callback#id_token=x&state=v1.9e1f", vec![]),
+    ] {
+        let resp = get_shell(path, &headers).await;
+        let status = resp.status();
+        let mut hs: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap().to_owned()))
+            .collect();
+        hs.sort();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        seen.push((status, hs, body));
+    }
+    for other in &seen[1..] {
+        assert_eq!(other, &seen[0]);
+    }
+    assert_eq!(seen[0].0, StatusCode::OK);
+}
+
+/// The exact policy the contract lists, and the one that must not be got
+/// wrong: NOT isolated, so the application opener survives the provider.
+#[tokio::test]
+async fn the_callback_shell_carries_the_exact_response_policy() {
+    let resp = get_shell("/auth/callback", &[]).await;
+    let h = resp.headers();
+    assert_eq!(h.get("cross-origin-opener-policy").unwrap(), "unsafe-none");
+    assert!(h.get("cross-origin-embedder-policy").is_none());
+    assert_eq!(h.get("content-type").unwrap(), "text/html; charset=utf-8");
+    assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
+    assert_eq!(h.get("cache-control").unwrap(), "no-store");
+    assert_eq!(h.get("referrer-policy").unwrap(), "no-referrer");
+    let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+    for directive in [
+        "default-src 'none'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+        "frame-src https://ccdp.example",
+        "connect-src 'none'",
+        "'sha256-",
+        "https://ccdp.example/ccdp/v1/callback.js",
+    ] {
+        assert!(csp.contains(directive), "{directive} missing from {csp}");
+    }
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("<main id=\"libid-root\"></main>"));
+    assert_eq!(html.matches("<script").count(), 1);
+    assert!(!html.contains("test-client-secret"));
+}
+
+/// The shell is a navigation target, and only that.
+#[tokio::test]
+async fn the_callback_shell_admits_only_get() {
+    let req = Request::post("/auth/callback").body(Body::empty()).unwrap();
+    let resp = app(test_state()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+/// One callback path. The paths an earlier revision of this branch served —
+/// and the alias it once had — are not routes on this bridge.
+#[tokio::test]
+async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
+    for path in [
+        "/ccdp/callback",
+        "/ccdp/prover",
+        "/auth/v1/callback",
+        "/api/v1/ceremony/callback",
+    ] {
+        let resp = get_shell(path, &[]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+    }
 }

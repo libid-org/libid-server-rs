@@ -56,7 +56,8 @@ out; origin checks and a closed input surface cannot constrain its owner.
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. |
 | `GET` | `/api/v1/ceremony/config` | The public ceremony configuration. Readable only from an admitted application origin. |
-| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from this server's own origin. |
+| `GET` | `{CALLBACK_PATH}` (default `/auth/callback`) | The registered OAuth callback shell: one document, identical for every request, that clears the provider's return and imports the Callback module from the CCDP Distribution. |
+| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin, whose preflight it answers. |
 
 ### `POST /api/v1/ceremony/github-token`
 
@@ -102,6 +103,26 @@ a server-side X callback was proposed and rejected: X's flow is browser-only by
 design and its callback belongs on the UI origin.
 
 
+## The CCDP Distribution
+
+This server is the **OAuth Bridge**, and only that. Everything the browser
+executes — the Callback module its shell imports, Airlock, the prover, the
+circuits and notarization client — is served by a separate static **CCDP
+Distribution** at `CCDP_ORIGIN`, which may be cross-site and knows nothing about
+this bridge. The bridge publishes configuration, serves one callback shell, and
+performs GitHub's exchange. It serves no CCDP resource and no proving asset.
+
+The callback shell is rendered once at startup and never varies: no request
+field — `Origin`, `Referer`, query, fragment — changes a byte of it or its
+policy. Its inline bootstrap bounds and copies the provider's return, clears it
+with `history.replaceState`, reads the CCDP version from the OAuth `state`,
+checks it against the closed supported list, and imports
+`{CCDP_ORIGIN}/ccdp/v{N}/callback.js`. The server never sees the return: the
+handler reads nothing from the request, and there is no request-logging
+middleware. **Any proxy in front of this server must redact the callback path's
+query string from its access logs** — that half of the contract is the
+operator's.
+
 ## Configuration
 
 All settings come from environment variables (or the matching `--flag`).
@@ -110,9 +131,12 @@ All settings come from environment variables (or the matching `--flag`).
 |---|---|---|
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `PORT` | `8722` | Bind port. |
-| `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server, as a bare origin. Every provider's registered callback URL must be exactly `{BASE_URL}{CALLBACK_ALIAS_PATH}`. |
-| `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins admitted to read the configuration. Exact origins, no patterns. |
-| `CALLBACK_ALIAS_PATH` | `/auth/v1/callback` | The path providers redirect back to. |
+| `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server, as a bare origin; HTTPS unless loopback. Every provider's registered callback URL must be exactly `{BASE_URL}{CALLBACK_PATH}`. |
+| `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins admitted to read the configuration. Exact HTTPS origins, no patterns; a duplicate is refused. |
+| `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
+| `CCDP_ORIGIN` | *(required)* | The CCDP Distribution this bridge selects: one HTTPS origin serving `/ccdp/v{N}/callback.js` and everything the browser runs after it. Published in the configuration and embedded in the shell. |
+| `CCDP_SUPPORTED_VERSIONS` | `1` | The closed list of CCDP versions the shell may import. |
+| `CALLBACK_STYLE_HASH` | *(empty)* | The package-published CSP hash of the Callback stylesheet, `sha256-…`. Empty means `style-src 'none'`. |
 | `CEREMONY_PLATFORMS` | *(required)* | The enabled platforms as JSON — see below. |
 | `NOTARY_URL` | `tcp://127.0.0.1:7047` | The notary server's TCP endpoint. |
 | `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret. Required exactly when `CEREMONY_PLATFORMS` enables `github`, and refused otherwise. |
@@ -120,17 +144,16 @@ All settings come from environment variables (or the matching `--flag`).
 ### `CEREMONY_PLATFORMS`
 
 ```json
-[{ "id": "github",
-   "clientId": "Iv1.…",
-   "versions": [{ "version": 1, "circuitUrl": "https://…/bearer_link.json" }] }]
+[{ "id": "github", "clientId": "Iv1.…", "versions": [1] }]
 ```
 
 One record per enabled platform, and the only place a platform is named. The
-public configuration and the prover profiles the shell embeds are two
-projections of it, so there is no second list to keep in step. `GH_OAUTH_CLIENT_ID`
-is gone for that reason: the GitHub client id is the `clientId` of the `github`
-record. One circuit per platform **and version** — a version is what the
-prover selects by, not a platform.
+public configuration is a projection of it, so there is no second list to keep
+in step. `GH_OAUTH_CLIENT_ID` is gone for that reason: the GitHub client id is
+the `clientId` of the `github` record. No circuit is named here — proving
+assets belong to the CCDP Distribution, which pins its own; a bridge advertises
+only the platform/version pairs that distribution serves, and cannot check that
+itself.
 
 There is no signing key to configure, and no AWS/KMS grant to provision: the
 server signs nothing (see [Trust model](#trust-model)). `BACKEND_SIGNING_KEY`

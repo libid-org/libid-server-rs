@@ -216,18 +216,19 @@ pub async fn github_token(
     headers: HeaderMap,
     body: Result<Json<TokenRequestBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, TokenError> {
-    // Callable only from this service's own origin. This is not caller
-    // authentication — a request with no browser behind it carries whatever
-    // `Origin` it likes — it stops a page on another origin from spending this
-    // service's secret through someone else's browser.
+    // Callable only from the configured CCDP origin: the prover runs there
+    // and derives this route from the bridge's `redirectUri`. This is not
+    // caller authentication — a request with no browser behind it carries
+    // whatever `Origin` it likes — it stops a page on another origin from
+    // spending this bridge's secret through someone else's browser.
     let origin = headers
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    if origin != state.server_origin {
+    if origin != state.ccdp_origin {
         return Err(TokenError {
             status: StatusCode::FORBIDDEN,
-            message: "this route is callable only from the ceremony origin".into(),
+            message: "this route is callable only from the configured CCDP origin".into(),
         });
     }
 
@@ -602,11 +603,16 @@ mod tests {
             notary_addr: "127.0.0.1:7047".into(),
             allowed_app_origins: vec!["http://localhost:3000".into()],
             ceremony_config: serde_json::Value::Null,
-            callback_alias: "/auth/v1/callback".into(),
+            callback_path: "/auth/callback".into(),
+            ccdp_origin: "https://ccdp.example".into(),
+            callback_shell: crate::shell::RenderedShell {
+                body: String::new(),
+                csp: String::new(),
+            },
             github_oauth: Some(crate::oauth::OAuthCredentials {
                 client_id: "Iv1.0123456789abcdef".into(),
                 client_secret: client_secret.into(),
-                redirect_uri: "http://127.0.0.1:8722/auth/v1/callback".into(),
+                redirect_uri: "http://127.0.0.1:8722/auth/callback".into(),
             }),
             exchange_permits: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_EXCHANGES,

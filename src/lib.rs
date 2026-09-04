@@ -13,6 +13,7 @@ pub mod deployment;
 pub mod error;
 pub mod oauth;
 pub mod routes;
+pub mod shell;
 pub mod state;
 
 use std::sync::Arc;
@@ -42,14 +43,16 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     }
     let server_origin = server_origin(&cfg.base_url)?;
 
-    let alias = callback_alias(&cfg.callback_alias_path)?;
+    let callback_path = callback_path(&cfg.callback_path)?;
     // One string, three uses: the route the provider returns to, the bytes the
     // notarized token request sends, and the `redirectUri` the public
     // configuration publishes. Deriving all three from one place is what stops
     // them drifting into a `redirect_uri_mismatch` nobody can see.
-    let redirect_uri = format!("{server_origin}{alias}");
+    let redirect_uri = format!("{server_origin}{callback_path}");
 
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
+    let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
+    let ccdp_versions = ccdp_versions(&cfg.ccdp_supported_versions)?;
     let platforms = deployment::platforms(&cfg.ceremony_platforms)?;
 
     let github = platforms.iter().find(|p| p.is_github());
@@ -72,15 +75,46 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             client_secret: cfg.gh_oauth_client_secret.clone(),
             redirect_uri: redirect_uri.clone(),
         }),
-        ceremony_config: routes::config::record(&redirect_uri, &platforms),
+        ceremony_config: routes::config::record(&redirect_uri, &ccdp_origin, &platforms),
+        callback_shell: shell::callback(&shell::ShellInputs {
+            ccdp_origin: &ccdp_origin,
+            supported_versions: &ccdp_versions,
+            allowed_app_origins: &allowed_app_origins,
+            style_hash: &cfg.callback_style_hash,
+        })?,
         allowed_app_origins,
+        ccdp_origin,
         notary_addr: notary_addr(&cfg.notary_url)?,
         exchange_permits: Arc::new(Semaphore::new(
             routes::github_token::MAX_CONCURRENT_EXCHANGES,
         )),
         server_origin,
-        callback_alias: alias,
+        callback_path,
     }))
+}
+
+/// The closed list of CCDP versions the shell may select.
+fn ccdp_versions(list: &str) -> Result<Vec<u16>> {
+    let mut out = Vec::new();
+    for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let v: u16 = item.parse().map_err(|_| Error::Config {
+            detail: format!("CCDP_SUPPORTED_VERSIONS: {item:?} is not a CCDP version"),
+        })?;
+        if out.contains(&v) {
+            return Err(Error::Config {
+                detail: format!("CCDP_SUPPORTED_VERSIONS names {v} more than once"),
+            });
+        }
+        out.push(v);
+    }
+    if out.is_empty() {
+        return Err(Error::Config {
+            detail: "CCDP_SUPPORTED_VERSIONS is empty, so the shell could import \
+                     no Callback at all"
+                .into(),
+        });
+    }
+    Ok(out)
 }
 
 /// The application origins admitted to read the configuration.
@@ -93,11 +127,15 @@ fn allowed_app_origins(list: &str) -> Result<Vec<String>> {
         .enumerate()
     {
         let origin = canonical_origin(&format!("ALLOWED_APP_ORIGINS[{i}]"), spelling)?;
-        // Set semantics: a repeated origin is the same permission twice, not
-        // an error, and the response must not depend on how it was written.
-        if !out.contains(&origin) {
-            out.push(origin);
+        // A duplicate is refused, not folded: the contract says a duplicate
+        // member is a deployment error rather than something the bridge
+        // normalizes, and a list written twice is a list nobody is reading.
+        if out.contains(&origin) {
+            return Err(Error::Config {
+                detail: format!("ALLOWED_APP_ORIGINS names {origin} more than once"),
+            });
         }
+        out.push(origin);
     }
     if out.is_empty() {
         return Err(Error::Config {
@@ -152,49 +190,33 @@ fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(refuse("carries credentials"));
     }
+    // Every origin the bridge trusts or publishes is a code-supply boundary,
+    // and a plaintext one is no boundary. Loopback is the stated exception,
+    // for development against a local server.
+    if url.scheme() == "http" && !is_loopback(&url) {
+        return Err(refuse("is plaintext http on a host that is not loopback"));
+    }
     Ok(url.origin().ascii_serialization())
 }
 
-/// An immutable asset URL: absolute, no query, no fragment, no credentials.
-///
-/// Immutable is the whole contract on these — a URL is never reused for
-/// different bytes — and a query or fragment is how a mutable one usually
-/// spells itself. Refusing both here means the shells embed only URLs that
-/// can honestly carry a year-long cache.
-pub(crate) fn immutable_url(field: &str, spelling: &str) -> Result<()> {
-    let url = Url::parse(spelling).map_err(|e| Error::Config {
-        detail: format!("{field} {spelling}: {e}"),
-    })?;
-    let refuse = |why: &str| Error::Config {
-        detail: format!("{field} {spelling} {why}"),
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(refuse("is not http or https"));
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
     }
-    if url.host().is_none() {
-        return Err(refuse("names no host"));
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err(refuse(
-            "carries a query or fragment, so it is not immutable",
-        ));
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(refuse("carries credentials"));
-    }
-    Ok(())
 }
 
-/// The path the provider redirects back to, and the only configurable route.
+/// The path the providers redirect back to, and the only configurable route.
 ///
-/// It is mounted as a second name for the callback shell, so a spelling axum
-/// reads as a pattern -- anything with braces in it -- would quietly turn one
-/// document into a wildcard. A path colliding with a fixed route is worse
-/// still: `Router::route` panics, and a deployment learns that by not
+/// A spelling axum reads as a pattern -- anything with braces in it -- would
+/// quietly turn one document into a wildcard. A path colliding with a fixed
+/// route is worse: `Router::route` panics, and a deployment learns that by not
 /// starting, with no line saying which setting did it.
-fn callback_alias(path: &str) -> Result<String> {
+fn callback_path(path: &str) -> Result<String> {
     let refuse = |why: &str| Error::Config {
-        detail: format!("CALLBACK_ALIAS_PATH {path} {why}"),
+        detail: format!("CALLBACK_PATH {path} {why}"),
     };
     if !path.starts_with('/') {
         return Err(refuse("does not begin with `/`"));
@@ -241,10 +263,10 @@ mod tests {
             "libid-server-rs",
             "--allowed-app-origins",
             "https://app.example",
+            "--ccdp-origin",
+            "https://ccdp.example",
             "--ceremony-platforms",
-            r#"[{"id":"github","clientId":"Iv1.0123456789abcdef",
-                 "versions":[{"version":1,
-                              "circuitUrl":"https://a.example/v1/bearer_link.json"}]}]"#,
+            r#"[{"id":"github","clientId":"Iv1.0123456789abcdef","versions":[1]}]"#,
             "--gh-oauth-client-secret",
             "ghs_secret",
         ];
@@ -262,7 +284,7 @@ mod tests {
         assert_eq!(state.server_origin, "https://id.example");
         assert_eq!(
             state.github_oauth.as_ref().unwrap().redirect_uri,
-            "https://id.example/auth/v1/callback"
+            "https://id.example/auth/callback"
         );
     }
 
@@ -326,7 +348,7 @@ mod tests {
             build_state(&config(&["--base-url", "https://ID.example.com:443/"])).unwrap();
         assert_eq!(
             state.github_oauth.as_ref().unwrap().redirect_uri,
-            "https://id.example.com/auth/v1/callback"
+            "https://id.example.com/auth/callback"
         );
     }
 

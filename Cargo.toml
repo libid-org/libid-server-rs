@@ -41,6 +41,8 @@ tower-http = { version = "0.6", features = ["cors"] }
 
 # ── everything else ─────────────────────────────────────────────────────
 base64 = "0.22"
+# The callback shell hashes its own bootstrap into its CSP at startup.
+sha2 = "0.10"
 # The notarized request is built as a `hyper::Request`, which is what
 # `prover_generic` takes: the session drives the exchange itself rather than
 # handing it to an HTTP client.
