@@ -105,6 +105,12 @@ design and its callback belongs on the UI origin.
 
 ## The CCDP Distribution
 
+The contract this server implements is `ts/packages/ceremony/OAUTH_BRIDGE.md`
+in the libid repository (branch `docs/ceremony-browser-architecture`). Where
+`specs/platform-ceremonies.md` §6.3 describes the same wire differently — route
+path, a `schema` member, a single-string attestation — this server follows
+OAUTH_BRIDGE.md, by decision.
+
 This server is the **OAuth Bridge**, and only that. Everything the browser
 executes — the Callback module its shell imports, Airlock, the prover, the
 circuits and notarization client — is served by a separate static **CCDP

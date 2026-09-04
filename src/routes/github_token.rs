@@ -424,7 +424,7 @@ fn select_layouts(sent: &[u8], recv: &[u8]) -> Result<Selection, ceremony::Layou
     let recv_layout = ceremony::token_response(recv)?;
     let bearer = bearer_range(&recv_layout)?;
     // Read here, off the transcript the notary attests, and never off the
-    // decoded response body. REQ-PLAT-38 asks for the exact bearer the
+    // decoded response body. OAUTH_BRIDGE.md asks for the exact bearer the
     // attestation commits, and the two are not always the same string: a JSON
     // escape decodes, and a chunk boundary landing inside the value shifts
     // everything after it. Handing back a bearer the commitment does not open
@@ -738,7 +738,7 @@ mod tests {
             &RECV[found.bearer.clone()],
             b"gho_16C7e42F292c6912E7710c838347Ae178B4a"
         );
-        // REQ-PLAT-38: what this route returns is the bearer the attestation
+        // OAUTH_BRIDGE.md: what this route returns is the bearer the attestation
         // commits, read off the attested transcript rather than re-parsed from
         // the decoded body, which need not spell it the same way.
         assert_eq!(found.bearer_bytes, &RECV[found.bearer]);
