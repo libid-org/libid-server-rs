@@ -134,7 +134,7 @@ pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
 /// caller-selected action, client, redirect, endpoint or return URL.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct TokenRequestBody {
+pub(crate) struct TokenRequestBody {
     /// The authorization code the callback captured.
     code: String,
     /// The PKCE verifier the browser derived for this ceremony.
@@ -151,7 +151,7 @@ pub struct TokenRequestBody {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AttestationBody {
-    /// The section 9.1 record, byte for byte as the notary produced it.
+    /// The attested record, byte for byte as the notary produced it.
     attested_data: String,
     /// EIP-191 over its keccak256 digest.
     signature: String,
@@ -177,7 +177,7 @@ struct TokenResponseBody {
 /// A refusal. The body carries a reason and never a partial result: two of the
 /// three values without the third would leave the browser holding something it
 /// cannot prove anything with.
-pub struct TokenError {
+pub(crate) struct TokenError {
     status: StatusCode,
     message: String,
 }
@@ -213,6 +213,12 @@ impl TokenError {
     /// The cause is LOGGED, never serialized: an anonymous caller learns that
     /// the exchange failed and nothing about this service's configuration, its
     /// notary, or which step of the session refused it.
+    ///
+    /// Logging it whole is safe in the other direction too. Nothing the caller
+    /// sends reaches a `Display` here: every `detail` is a literal, an io
+    /// error, or a length and an index -- the bounds errors carry the position
+    /// of a bad byte and never the bytes -- so there is no line for a crafted
+    /// `code` to forge and no credential for a log to spill.
     fn upstream(cause: impl std::fmt::Display) -> Self {
         tracing::error!(%cause, "github token exchange failed");
         Self {
@@ -635,6 +641,14 @@ async fn exchange(
 mod tests {
     use super::*;
 
+    use libid_ceremony::token_exchange::{
+        BEARER_OPENING_LEN,
+        MAX_ACCESS_TOKEN_BYTES,
+        MAX_ATTESTED_DATA_BYTES,
+        MAX_RESPONSE_BYTES,
+        SIGNATURE_LEN,
+    };
+
     /// The head this service writes, as `prover_generic` will send it: header
     /// names go on the wire lowercase, and hyper adds the `content-length` a
     /// sized body implies. A fixture missing it would put every offset below a
@@ -933,5 +947,84 @@ mod tests {
             commit: core::iter::once(8..16).collect(),
         };
         assert!(bearer_range(&layout).is_err());
+    }
+
+    /// "The encoded response body is at most 3 MiB", says the contract, and
+    /// nothing in this service enforces that number directly. It holds because
+    /// the three parts are each bounded and base64 expands by a known ratio --
+    /// so the way to know it still holds is to build the largest response the
+    /// bounds admit and serialize it. A later bound raised past what 3 MiB can
+    /// carry fails here rather than on a browser that cannot read the answer.
+    #[test]
+    fn the_largest_response_the_bounds_admit_fits_the_contract() {
+        let body = TokenResponseBody {
+            access_token: "t".repeat(MAX_ACCESS_TOKEN_BYTES),
+            token_attestation: AttestationBody {
+                attested_data: b64(&vec![0xff; MAX_ATTESTED_DATA_BYTES]),
+                signature: b64(&[0xff; SIGNATURE_LEN]),
+            },
+            bearer_opening: b64(&[0xff; BEARER_OPENING_LEN]),
+        };
+        let encoded = serde_json::to_vec(&body).unwrap();
+        assert!(
+            encoded.len() <= MAX_RESPONSE_BYTES,
+            "the largest admissible response is {} bytes, over the {MAX_RESPONSE_BYTES} \
+             the contract allows",
+            encoded.len()
+        );
+    }
+
+    /// `"access_token":""` frames an empty run. The layout forms -- both
+    /// anchors are there -- and the complement never commits a zero-length
+    /// range, so no opening would open it and the failure would arrive as a
+    /// notary fault. It is GitHub answering with no bearer, which is the
+    /// caller's to fix, so it is told apart here and answered as one.
+    #[test]
+    fn an_empty_bearer_is_refused_as_a_platform_refusal_and_not_a_notary_fault() {
+        let credentials = credentials("ghs_secret");
+        let sent = sent(&credentials, &request());
+        let recv = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"access_token\":\"\",\"token_type\":\"bearer\"}";
+
+        // Destructured rather than `unwrap_err`, which would need `Debug` on
+        // `Selection` -- and `Selection` carries the bearer.
+        let Err(refusal) = select_layouts(&sent, recv) else {
+            panic!("an empty bearer must not produce a selection")
+        };
+        assert!(
+            matches!(&refusal, ceremony::LayoutError::MissingField(f) if f == "access_token"),
+            "got {refusal:?}"
+        );
+        // And that is the one refusal the caller is told to act on.
+        let told = platform_refusal(Some(&refusal)).expect("a platform refusal");
+        assert!(matches!(told, Error::OAuthFailed { .. }));
+        assert_eq!(
+            TokenError::from_exchange(told).status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// Every other layout refusal is this service, the notary or a response
+    /// nobody can describe -- and the caller can only try again later.
+    #[test]
+    fn a_response_with_no_access_token_field_at_all_is_not_the_callers_to_fix() {
+        let credentials = credentials("ghs_secret");
+        let sent = sent(&credentials, &request());
+        let recv = b"HTTP/1.1 500 Internal Server Error\r\n\r\n{}";
+
+        let Err(refusal) = select_layouts(&sent, recv) else {
+            panic!("a response with no bearer must not produce a selection")
+        };
+        // A missing anchor and an empty value are the same `LayoutError`, and
+        // both mean GitHub had no bearer for this code.
+        assert!(platform_refusal(Some(&refusal)).is_some());
+        // A refusal of any other shape is not, and is answered as upstream.
+        let other = ceremony::LayoutError::NoHeadBoundary;
+        assert!(platform_refusal(Some(&other)).is_none());
+        assert!(platform_refusal(None).is_none());
+
+        // Restated for the session driver, it says a transcript was refused
+        // and carries the reason, not a second guess at whose fault it is.
+        let restated = layout_failed(&refusal);
+        assert!(restated.to_string().contains("access_token"), "{restated}");
     }
 }

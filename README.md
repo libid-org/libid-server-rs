@@ -129,6 +129,23 @@ middleware. **Any proxy in front of this server must redact the callback path's
 query string from its access logs** — that half of the contract is the
 operator's.
 
+## What the operator has to supply
+
+Two things this server deliberately does not do for itself.
+
+**Redact the callback query from proxy access logs.** The handler reads
+nothing from the request, so the authorization code never reaches this
+process — but a proxy that logs request lines by default writes it to disk
+before this server sees the request at all.
+
+**Rate-limit `/api/v1/ceremony/github-token` by client.** The route caps
+concurrent exchanges at 8 and answers `503` past that, which bounds how much
+of this process one caller can hold at once. It is not rate limiting: the
+`Origin` check is not caller authentication and says so, an anonymous caller
+can retry as fast as it likes, and every accepted request spends the GitHub
+client secret against the OAuth app's standing with GitHub. A per-client
+limit belongs in the proxy, where the client is identified.
+
 ## Configuration
 
 All settings come from environment variables (or the matching `--flag`).
@@ -138,9 +155,9 @@ All settings come from environment variables (or the matching `--flag`).
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `PORT` | `8722` | Bind port. |
 | `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server, as a bare origin; HTTPS unless loopback. Every provider's registered callback URL must be exactly `{BASE_URL}{CALLBACK_PATH}`. |
-| `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins admitted to read the configuration. Exact HTTPS origins, no patterns; a duplicate is refused. |
+| `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins admitted to read the configuration. Exact origins, no patterns; HTTPS unless loopback; a duplicate is refused. |
 | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
-| `CCDP_ORIGIN` | *(required)* | The CCDP Distribution this bridge selects: one HTTPS origin serving `/ccdp/v{N}/callback.js` and everything the browser runs after it. Published in the configuration and embedded in the shell. |
+| `CCDP_ORIGIN` | *(required)* | The CCDP Distribution this bridge selects: one origin serving `/ccdp/v{N}/callback.js` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and embedded in the shell. |
 | `CCDP_SUPPORTED_VERSIONS` | `1` | The closed list of CCDP versions the shell may import. |
 | `CALLBACK_STYLE_HASH` | *(empty)* | The package-published CSP hash of the Callback stylesheet, `sha256-…`. Empty means `style-src 'none'`. |
 | `CEREMONY_PLATFORMS` | *(required)* | The enabled platforms as JSON — see below. |
@@ -201,7 +218,7 @@ listens on `0.0.0.0:8722` and carries a `/health` healthcheck.
 ## Building from source
 
 ```sh
-cargo build --release          # rustc >= 1.94.1
+cargo build --release          # rustc >= 1.95 (see rust-version in Cargo.toml)
 cargo test
 ```
 

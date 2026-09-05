@@ -3,7 +3,7 @@
 use clap::Parser;
 use url::Url;
 
-/// Configuration for the handles backend server.
+/// Everything this bridge reads from its environment.
 ///
 /// Every flag has an environment-variable form; the env names are the
 /// deployment contract.

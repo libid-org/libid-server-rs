@@ -7,9 +7,9 @@
 //! built once at startup rather than assembled per call.
 //!
 //! An application reads it once when it creates its ceremony client. The
-//! callback and prover documents never read it: what they need is embedded in
-//! them, because a document that fetched its own configuration would be a
-//! document whose behaviour depends on a request.
+//! callback shell never reads it: what that document needs is rendered into
+//! it at startup, because a document that fetched its own configuration would
+//! be a document whose behaviour depends on a request.
 
 use std::sync::Arc;
 

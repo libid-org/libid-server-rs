@@ -90,9 +90,9 @@ impl PlatformProfile {
 
 /// Parse and check the whole enabled set.
 ///
-/// Everything here fails the process rather than a ceremony. A platform
-/// advertised with a circuit that does not exist, or a version this service
-/// cannot serve, is a deployment that starts cleanly and then refuses real
+/// Everything here fails the process rather than a ceremony. A platform named
+/// twice, one carrying no client id, or one advertising a version this service
+/// cannot serve is a deployment that starts cleanly and then refuses real
 /// users — which is the failure this function exists to move earlier.
 pub fn platforms(json: &str) -> Result<Vec<PlatformProfile>> {
     let refuse = |detail: String| Error::Config {

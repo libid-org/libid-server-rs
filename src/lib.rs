@@ -62,9 +62,9 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let style_hash = style_hash(&cfg.callback_style_hash)?;
     let platforms = deployment::platforms(&cfg.ceremony_platforms)?;
 
-    // One decision, stated once. The XNOR this replaces asserted a boolean
-    // identity, then re-destructured it to pick an error message, then derived
-    // the same fact a third time to build the credentials.
+    // One decision on the pair, and each arm is a whole answer: the exchange
+    // this deployment can perform, the deployment that performs none, or the
+    // two ways of naming half of one.
     let github = match (
         platforms.iter().find(|p| p.is_github()),
         cfg.gh_oauth_client_secret.as_str(),
@@ -217,9 +217,11 @@ fn server_origin(base_url: &str) -> Result<String> {
     canonical_origin("BASE_URL", base_url)
 }
 
-/// The same reading for every origin-shaped input: this service's own, and
-/// each application origin admitted to read the configuration. One function so
-/// the two cannot be spelled by different rules and then compared.
+/// The same reading for every origin this deployment configures: this
+/// service's own, the CCDP Distribution it selects, and each application
+/// origin admitted to read the configuration. One function, because these
+/// strings are compared against each other and against what a browser sends,
+/// and two spellings of the same rule are two rules.
 fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     let url = Url::parse(spelling).map_err(|e| Error::Config {
         detail: format!("{field} {spelling}: {e}"),
@@ -251,7 +253,24 @@ fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     if url.scheme() == "http" && !is_loopback(&url) {
         return Err(refuse("is plaintext http on a host that is not loopback"));
     }
-    Ok(url.origin().ascii_serialization())
+    // `Url` admits bytes in a host that no browser would ever send and that a
+    // Content-Security-Policy reads as syntax: `;` there starts a new
+    // directive, and CSP honours the FIRST occurrence of each. The CCDP origin
+    // is spliced unescaped into `script-src` and `frame-src`, so
+    // `https://a;b.example` silently truncates the module source and the shell
+    // imports nothing. Closed to what an origin is actually made of, which is
+    // the same shape `CALLBACK_STYLE_HASH` is held to and for the same reason.
+    let origin = url.origin().ascii_serialization();
+    if !origin
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-.:[]/".contains(&b))
+    {
+        return Err(refuse(
+            "carries a byte an origin is not made of, which a \
+             Content-Security-Policy would read as syntax",
+        ));
+    }
+    Ok(origin)
 }
 
 fn is_loopback(url: &Url) -> bool {
@@ -367,8 +386,8 @@ mod tests {
 
     /// The redirect URI is derived, not configured, and a provider refuses an
     /// exchange whose two spellings differ. So it has to be exactly the
-    /// configured callback alias under the configured base URL — the same
-    /// string the public configuration publishes and the alias route mounts.
+    /// configured callback path under the configured base URL — the same
+    /// string the public configuration publishes and the router mounts.
     #[test]
     fn the_redirect_uri_is_the_callback_route_under_the_base_url() {
         let state = build_state(&config(&["--base-url", "https://id.example/"])).unwrap();
@@ -410,6 +429,28 @@ mod tests {
             server_origin("http://127.0.0.1:8722").unwrap(),
             "http://127.0.0.1:8722"
         );
+    }
+
+    /// The plaintext exception is loopback and only loopback, in each of the
+    /// three spellings a host can take. A deployment reaching a development
+    /// server over `http` is why the exception exists; one reaching anything
+    /// else over `http` has an unauthenticated code-supply boundary.
+    #[test]
+    fn plaintext_is_admitted_for_loopback_and_refused_everywhere_else() {
+        for spelling in [
+            "http://127.0.0.1:8722",
+            "http://[::1]:8722",
+            "http://localhost:3000",
+        ] {
+            assert!(canonical_origin("T", spelling).is_ok(), "{spelling}");
+        }
+        for spelling in [
+            "http://10.0.0.1",
+            "http://192.168.1.1:8722",
+            "http://app.example",
+        ] {
+            assert!(canonical_origin("T", spelling).is_err(), "{spelling}");
+        }
     }
 
     /// Anything a browser never sends as `Origin` is refused at startup. Left
@@ -486,13 +527,45 @@ mod tests {
                 "a callback path colliding with a fixed route",
                 vec!["--callback-path", "/api/v1/ceremony/config"],
             ),
+            // Routed by axum, read as scheme-relative by a browser: the
+            // bootstrap's `history.replaceState` throws cross-origin before it
+            // clears, so the authorization code stays in the address bar and
+            // nothing on this side ever hears about it.
             (
-                "a stylesheet hash that could forge a CSP directive",
-                vec!["--callback-style-hash", "x'; connect-src *; style-src 'x"],
+                "a scheme-relative callback path",
+                vec!["--callback-path", "//evil.example/cb"],
             ),
             (
                 "a stylesheet hash of no named algorithm",
                 vec!["--callback-style-hash", "abc123"],
+            ),
+            // Two ways to forge a CSP directive out of this one setting, and
+            // two different guards catch them: no named algorithm at all, and
+            // a named algorithm followed by bytes that are not base64. The
+            // second is the one a `sha256-` prefix would otherwise wave past.
+            (
+                "a stylesheet hash whose prefix is right and whose body is not base64",
+                vec!["--callback-style-hash", "sha256-abc'; connect-src *"],
+            ),
+            (
+                "a stylesheet hash of a named algorithm and nothing else",
+                vec!["--callback-style-hash", "sha256-"],
+            ),
+            // `Url` keeps these in a host; a Content-Security-Policy reads the
+            // first as a directive separator. Every configured origin is held
+            // to the same shape, because all three reach a policy or a
+            // comparison with what a browser sent.
+            (
+                "a base URL whose host carries a CSP directive separator",
+                vec!["--base-url", "https://a;b.example"],
+            ),
+            (
+                "a CCDP origin whose host carries a CSP directive separator",
+                vec!["--ccdp-origin", "https://a;b.example"],
+            ),
+            (
+                "an admitted origin whose host carries a CSP keyword quote",
+                vec!["--allowed-app-origins", "https://a'b.example"],
             ),
         ] {
             assert!(
@@ -500,6 +573,31 @@ mod tests {
                 "{why} must stop the process"
             );
         }
+    }
+
+    /// The whole catalog, in the configuration an application reads. Every
+    /// platform is keyed by the name it is selected by, and the record carries
+    /// the public client id and versions and nothing else.
+    #[test]
+    fn the_published_configuration_keys_every_enabled_platform_by_name() {
+        let state = build_state(&config(&[
+            "--ceremony-platforms",
+            r#"[{"id":"google","clientId":"g","versions":[1,2]},{"id":"x","clientId":"xc","versions":[3]},{"id":"github","clientId":"gh","versions":[1]}]"#,
+        ]))
+        .unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&state.ceremony_config).unwrap();
+        let platforms = record["platforms"].as_object().unwrap();
+        let mut names: Vec<&str> = platforms.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["github", "google", "x"]);
+        assert_eq!(
+            platforms["google"]["ceremonyVersions"],
+            serde_json::json!([1, 2])
+        );
+        assert_eq!(platforms["x"]["clientId"], "xc");
+        // The secret is the one thing the public record must never carry.
+        assert!(!String::from_utf8_lossy(&state.ceremony_config).contains("ghs_secret"));
     }
 
     /// The secret and the platform that spends it travel together, or neither
@@ -529,11 +627,13 @@ mod tests {
         assert!(state.github.is_none());
     }
 
-    /// The one path that proves the router and the state agree -- and the only
-    /// one that would catch a configured callback path colliding with a fixed
-    /// route, which `Router::route` answers with a panic.
+    /// `Router::route` answers a duplicate path with a panic, and a
+    /// deployment would meet that by failing to start with nothing saying
+    /// which setting did it. `callback_path` refuses the collision first, and
+    /// this is what proves the two agree -- for the deployment that mounts the
+    /// token route and for the one that does not.
     #[test]
-    fn a_valid_deployment_builds_a_router() {
+    fn building_the_router_for_a_configured_deployment_does_not_panic() {
         let state = build_state(&config(&[])).unwrap();
         let _: axum::Router = routes::build_router(state);
 

@@ -251,6 +251,23 @@ mod tests {
         assert!(shell.csp.contains("connect-src 'none'"));
     }
 
+    /// Every non-ASCII byte leaves as a `\uXXXX` escape, astral planes as the
+    /// surrogate pair JavaScript reads them as -- which makes the whole
+    /// document ASCII and its declared encoding irrelevant to what it means.
+    #[test]
+    fn an_embedded_value_leaves_the_document_ascii() {
+        let escaped = json(&serde_json::json!("caf\u{e9} \u{1f512} \u{2028}"));
+        assert!(escaped.is_ascii(), "{escaped}");
+        assert!(escaped.contains("\\u00e9"), "{escaped}");
+        // U+1F512 is outside the BMP: two escapes, not one.
+        assert!(
+            escaped.contains("\\ud83d") && escaped.contains("\\udd12"),
+            "{escaped}"
+        );
+        // A line separator ends a statement in JavaScript and not in JSON.
+        assert!(escaped.contains("\\u2028"), "{escaped}");
+    }
+
     /// A value that closed the script element would end the document early
     /// and put whatever followed outside the hash.
     #[test]
@@ -285,9 +302,45 @@ mod tests {
         );
     }
 
-    /// The bootstrap sees the deployment's values and no request's.
+    /// The step the whole document exists for: the provider's return is
+    /// copied, then cleared out of this document's own URL, and the clearing
+    /// happens before anything decides, renders, imports or reports. A version
+    /// check moved above it would leave the credential in the address bar and
+    /// in history for every unsupported return.
     #[test]
-    fn the_bootstrap_embeds_the_deployment_and_only_the_deployment() {
+    fn the_bootstrap_clears_the_return_before_it_decides_anything() {
+        let body = render(&origins(), "").body;
+        let clear = body
+            .find("history.replaceState(null, '', location.pathname);")
+            .expect("the bootstrap clears its own URL");
+
+        // Copied first, cleared second: the reads have to precede the clear or
+        // there is nothing left to read.
+        for read in [
+            "const query = location.search;",
+            "const fragment = location.hash;",
+        ] {
+            assert!(
+                body.find(read).unwrap() < clear,
+                "{read} must precede the clear"
+            );
+        }
+        // And nothing that acts on the return may precede it. `fail()` is
+        // matched as a CALL, not as its definition -- the definition is
+        // hoisted above the clear and always will be.
+        for after in ["import(", "supportedCCDPVersions.includes", "fail();"] {
+            assert!(
+                body.find(after).unwrap() > clear,
+                "{after} must not run before the return is cleared"
+            );
+        }
+    }
+
+    /// The bootstrap sees the deployment's values and nothing else this
+    /// process holds -- no secret, no notary, no admitted-origin list beyond
+    /// the one the Callback authenticates against.
+    #[test]
+    fn the_bootstrap_embeds_the_configured_origins_versions_and_nothing_secret() {
         let shell = render(&origins(), "");
         for needle in [
             "\"https://ccdp.example\"",
@@ -295,6 +348,13 @@ mod tests {
             "[1]",
         ] {
             assert!(shell.body.contains(needle), "{needle} missing");
+        }
+        // Nothing a deployment holds that the browser has no use for.
+        for absent in ["client_secret", "notary", "7047"] {
+            assert!(
+                !shell.body.contains(absent),
+                "{absent} must not be embedded"
+            );
         }
     }
 }

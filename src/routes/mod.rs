@@ -43,8 +43,16 @@ use tower_http::cors::{
 use crate::state::AppState;
 
 /// Liveness probe.
-async fn health() -> &'static str {
-    "OK"
+///
+/// It carries `nosniff` like every other response here. The body is two bytes
+/// of ASCII and nothing an operator sends reaches it, so this is not a hole
+/// being closed -- it is the one route that would otherwise be the exception,
+/// and an exception is what a reader has to stop and account for.
+async fn health() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        "OK",
+    )
 }
 
 /// The routes whose names this bridge fixes, in one place so the configured
@@ -70,7 +78,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route(HEALTH_PATH, get(health))
         .route(CONFIG_PATH, get(config::config))
-        .route(&state.callback_path.clone(), get(callback::callback))
+        .route(&state.callback_path, get(callback::callback))
         .with_state(state.clone());
 
     // Mounted with the exchange or not mounted at all. The handler has no

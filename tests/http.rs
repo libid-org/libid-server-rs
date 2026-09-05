@@ -75,12 +75,16 @@ fn app(state: Arc<AppState>) -> axum::Router {
 }
 
 #[tokio::test]
-async fn health_is_ok() {
+async fn health_answers_ok_and_carries_nosniff_like_every_other_route() {
     let resp = app(test_state())
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()[axum::http::header::X_CONTENT_TYPE_OPTIONS],
+        "nosniff"
+    );
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&bytes[..], b"OK");
 }
@@ -417,7 +421,8 @@ async fn the_callback_shell_is_the_same_bytes_whatever_the_request() {
         ),
         // Kept for the shape, not the coverage: a fragment never reaches the
         // wire, so `Uri` drops it and this is the bare path again. What clears
-        // the fragment is the bootstrap, tested in `shell.rs`.
+        // the fragment is the bootstrap, covered by
+        // `shell::tests::the_bootstrap_clears_the_return_before_it_decides_anything`.
         ("/auth/callback#id_token=x&state=v1.9e1f", vec![]),
     ] {
         let resp = get_shell(path, &headers).await;

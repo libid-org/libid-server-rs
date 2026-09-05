@@ -19,13 +19,10 @@ use crate::oauth::OAuthCredentials;
 /// Everything the confidential exchange needs, and nothing any other route
 /// does.
 ///
-/// These four values are meaningful only where GitHub is enabled. Held beside
-/// the rest of the state they were an invariant a doc comment asserted and the
-/// type did not: a deployment without GitHub carried a notary address nothing
-/// dialled and a permit nobody acquired, and the handler opened with a runtime
-/// check for the state and the router disagreeing. Grouped here and reached
-/// only as the token route's own state, the disagreement cannot be spelled --
-/// the route is mounted with this or it is not mounted.
+/// These four values are meaningful only where GitHub is enabled, and this is
+/// the token route's own state -- so it is mounted with them or it is not
+/// mounted. There is no deployment that holds a notary address nothing dials,
+/// and no request that has to check whether the state and the router agree.
 pub struct GithubExchange {
     /// GitHub's confidential client. The secret never leaves this process and
     /// is never revealed in a notarized transcript.
