@@ -21,7 +21,7 @@
 
 pub(crate) mod callback;
 pub(crate) mod config;
-pub mod github_token;
+pub(crate) mod github_token;
 
 use std::sync::Arc;
 

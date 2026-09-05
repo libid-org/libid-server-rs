@@ -188,12 +188,12 @@ async fn github_token_sheds_when_no_permit_is_free() {
     // Held, not configured away: the ceiling is what production sets, and
     // this is what a full one looks like from outside.
     let state = test_state();
-    let github = state.github.clone().expect("github is enabled");
-    let _held = github
-        .permits
+    let _held = state
+        .exchange_permits()
+        .expect("github is enabled")
         .try_acquire_many(libid_server_rs::state::MAX_CONCURRENT_EXCHANGES as u32)
         .expect("every permit is free at the start of this test");
-    let resp = app(state).oneshot(req).await.unwrap();
+    let resp = app(state.clone()).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }

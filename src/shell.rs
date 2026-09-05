@@ -36,31 +36,36 @@ const BOOTSTRAP: &str = include_str!("shells/callback.js");
 
 /// The finished document: the exact bytes, and the policy they are served
 /// under.
+/// Its fields are private to this crate and `callback` is the only
+/// constructor, because the one property the whole document rests on -- the
+/// policy names the hash of the script the body carries -- is established
+/// there and nowhere else. A pair assembled anywhere else is a document a
+/// browser refuses to run, served 200.
 pub struct RenderedShell {
     /// The document, rendered once. `Bytes`, so serving it is a reference
     /// count and not a copy: the contract's "one document" is one allocation
     /// for the life of the process, not one per request.
-    pub body: Bytes,
+    pub(crate) body: Bytes,
     /// Its `Content-Security-Policy`, carrying the hash of the bootstrap the
     /// body actually contains. Parsed into a header value once, here, so no
     /// request pays for -- or can fail -- that parse.
-    pub csp: HeaderValue,
+    pub(crate) csp: HeaderValue,
 }
 
 /// What the shell embeds.
-pub struct ShellInputs<'a> {
+pub(crate) struct ShellInputs<'a> {
     /// The CCDP Distribution whose Callback the shell imports.
-    pub ccdp_origin: &'a str,
+    pub(crate) ccdp_origin: &'a str,
     /// The closed list of CCDP versions the shell may select.
-    pub supported_versions: &'a [u16],
+    pub(crate) supported_versions: &'a [u16],
     /// The application origins the Callback authenticates against.
-    pub allowed_app_origins: &'a [String],
+    pub(crate) allowed_app_origins: &'a [String],
     /// The package-published stylesheet hash, or empty.
-    pub style_hash: &'a str,
+    pub(crate) style_hash: &'a str,
 }
 
 /// Render the callback shell.
-pub fn callback(inputs: &ShellInputs<'_>) -> Result<RenderedShell> {
+pub(crate) fn callback(inputs: &ShellInputs<'_>) -> Result<RenderedShell> {
     // Only version 1 exists and its default tuple serves it, so there is
     // nothing to override yet. The map is embedded empty rather than omitted
     // so the bootstrap's algorithm is already the one a second version needs.

@@ -16,11 +16,11 @@
 #![warn(missing_docs)]
 
 pub mod config;
-pub mod deployment;
+pub(crate) mod deployment;
 pub mod error;
-pub mod oauth;
+pub(crate) mod oauth;
 pub mod routes;
-pub mod shell;
+pub(crate) mod shell;
 pub mod state;
 
 use std::sync::Arc;
