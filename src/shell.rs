@@ -270,6 +270,21 @@ mod tests {
             .contains("style-src 'sha256-abc'"));
     }
 
+    /// Google's profile is `response_mode=fragment`, so its routing `state`
+    /// never reaches the query. A bootstrap that searched only the query would
+    /// fail every Google ceremony closed while the platform stayed admitted.
+    #[test]
+    fn the_bootstrap_looks_for_the_routing_state_in_both_halves() {
+        let body = render(&origins(), "").body;
+        assert!(body.contains("new URLSearchParams(query).getAll('state')"));
+        assert!(
+            body.contains(
+                "new URLSearchParams(fragment.replace(/^#/, '')).getAll('state')"
+            ),
+            "the fragment carries the state for Google"
+        );
+    }
+
     /// The bootstrap sees the deployment's values and no request's.
     #[test]
     fn the_bootstrap_embeds_the_deployment_and_only_the_deployment() {

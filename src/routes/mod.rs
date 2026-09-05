@@ -25,6 +25,7 @@ pub mod github_token;
 use std::sync::Arc;
 
 use axum::{
+    extract::DefaultBodyLimit,
     http::HeaderValue,
     routing::{
         get,
@@ -73,6 +74,11 @@ pub fn build_router(state: &AppState) -> Router<Arc<AppState>> {
                 "/api/v1/ceremony/github-token",
                 post(github_token::github_token),
             )
+            // A `TokenRequest` is a 1 KiB code and a 43-character verifier.
+            // Without this, axum buffers up to its 2 MiB default and runs
+            // serde before the handler's origin check ever executes -- the
+            // extractor runs first, whatever order the handler reads in.
+            .layer(DefaultBodyLimit::max(8 * 1024))
             .layer(token_cors(&state.ccdp_origin));
         router = router.merge(token);
     }

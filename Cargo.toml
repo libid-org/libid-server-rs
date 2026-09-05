@@ -36,7 +36,8 @@ libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "4e89f
 
 # ── HTTP server / client ────────────────────────────────────────────────
 axum = "0.8"
-# One layer, one origin: the preflight REQ-PLAT-43A requires answered.
+# One layer, one origin: the token-route preflight OAUTH_BRIDGE.md requires
+# answered, for the configured CCDP origin.
 tower-http = { version = "0.6", features = ["cors"] }
 
 # ── everything else ─────────────────────────────────────────────────────

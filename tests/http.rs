@@ -1,5 +1,5 @@
-//! HTTP-level tests over the axum router, plus the challenge lifecycle and
-//! OAuth-state round-trip.
+//! HTTP-level tests over the axum router: the public configuration, the
+//! callback shell's invariance and policy, and the token route's origin gate.
 
 use std::sync::Arc;
 
@@ -55,7 +55,7 @@ fn state_with(permits: usize, github: bool) -> Arc<AppState> {
             client_secret: "test-client-secret".into(),
             redirect_uri: redirect_uri.into(),
         }),
-        exchange_permits: Arc::new(Semaphore::new(permits)),
+        exchange_permits: Semaphore::new(permits),
     })
 }
 
@@ -174,8 +174,12 @@ async fn github_token_sheds_when_no_permit_is_free() {
     assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
 
-/// The origin is checked before the body is even parsed, so a foreign page
-/// cannot use a malformed body to tell one refusal from the other.
+/// A foreign page cannot use a malformed body to tell one refusal from the
+/// other: whatever the body, the answer is the origin's.
+///
+/// The parse itself happens first regardless -- it is an extractor, and axum
+/// runs those before the handler -- which is why the route also carries a body
+/// limit rather than relying on this ordering.
 #[tokio::test]
 async fn github_token_checks_the_origin_before_the_body() {
     let resp = post_token(Some("https://evil.example"), "not json at all".into()).await;
@@ -313,9 +317,12 @@ async fn config_refuses_an_absent_or_unlisted_origin() {
     }
 }
 
-/// The record carries what an application needs to start a ceremony and
-/// nothing else. A secret or an admitted-origin list in here would be a
-/// deployment publishing its own configuration to every application it admits.
+/// The record carries exactly what the contract lists and nothing else.
+///
+/// `allowedAppOrigins` is absent because the contract says the record contains
+/// no such field -- not because the list is secret: the callback shell embeds
+/// it in a document served to anyone, and the Callback module needs it there.
+/// The secret is the field that genuinely must never appear.
 #[tokio::test]
 async fn config_carries_no_secret_and_no_admitted_origin() {
     let body = body_of(get_config(Some(APP_ORIGIN), "").await).await;
@@ -401,6 +408,9 @@ async fn the_callback_shell_is_the_same_bytes_whatever_the_request() {
             "/auth/callback",
             vec![("referer", "https://github.com/login")],
         ),
+        // Kept for the shape, not the coverage: a fragment never reaches the
+        // wire, so `Uri` drops it and this is the bare path again. What clears
+        // the fragment is the bootstrap, tested in `shell.rs`.
         ("/auth/callback#id_token=x&state=v1.9e1f", vec![]),
     ] {
         let resp = get_shell(path, &headers).await;

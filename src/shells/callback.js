@@ -36,11 +36,17 @@ history.replaceState(null, '', location.pathname);
 if (oversized) {
   fail();
 } else {
-  // 3. Only a provider return with exactly one routing `state`. This document
-  //    parses no platform field, classifies no approval or denial, and does
-  //    not read the fragment -- Google's credential lives there and is not
-  //    ours to read; the module receives it unchanged.
-  const states = new URLSearchParams(query).getAll('state');
+  // 3. Only a provider return with exactly one routing `state`. It arrives in
+  //    the query for X and GitHub and in the FRAGMENT for Google, whose
+  //    profile is `response_mode=fragment` -- so both are searched, and one
+  //    `state` across both is what "exactly one" means. This document still
+  //    parses no platform field and classifies no approval or denial: it takes
+  //    the routing value and nothing else, and the module receives the whole
+  //    return unchanged, credential included.
+  const states = [
+    ...new URLSearchParams(query).getAll('state'),
+    ...new URLSearchParams(fragment.replace(/^#/, '')).getAll('state'),
+  ];
   // 4. Only the `v<version>.` prefix, and only a version on the closed list.
   const match = states.length === 1 ? /^v(\d+)\./.exec(states[0]) : null;
   const version = match ? Number(match[1]) : NaN;

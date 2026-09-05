@@ -1,10 +1,16 @@
-//! Minimal identity/handles backend.
+//! The OAuth Bridge of a libID ceremony.
 //!
-//! Exactly the endpoints the OAuth handle-claim flow needs, and nothing
-//! else: the UI does OAuth via this server, the server produces a
-//! bind-ready proof via MPC-TLS with the notary, the UI submits the bind
-//! on-chain itself. No database, no wallet routes, no sponsor pool, no
-//! indexer, no JWKS rotator.
+//! Three routes, and the contract is `OAUTH_BRIDGE.md` in the libid
+//! repository. It publishes the configuration an application starts from,
+//! serves the one callback document the OAuth platforms redirect back to, and
+//! performs the one exchange a browser cannot: GitHub's, which needs a client
+//! secret.
+//!
+//! Everything the browser executes after that callback -- the Callback module
+//! it imports, Airlock, the prover, its circuits and notarization client -- is
+//! served by a separate CCDP Distribution at a configured origin. This service
+//! verifies no proof, holds no key of its own, keeps no ceremony state, and
+//! talks to no chain.
 
 #![warn(missing_docs)]
 
@@ -36,8 +42,8 @@ use url::Url;
 pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     if cfg.base_url.is_empty() {
         return Err(Error::Config {
-            detail: "BASE_URL must be set \u{2014} it is this service's own origin, \
-                     which the GitHub token route checks callers against"
+            detail: "BASE_URL must be set \u{2014} it is this bridge's own origin, \
+                     which every registered redirect URI is built on"
                 .into(),
         });
     }
@@ -53,6 +59,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
     let ccdp_versions = ccdp_versions(&cfg.ccdp_supported_versions)?;
+    style_hash(&cfg.callback_style_hash)?;
     let platforms = deployment::platforms(&cfg.ceremony_platforms)?;
 
     let github = platforms.iter().find(|p| p.is_github());
@@ -85,12 +92,42 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         allowed_app_origins,
         ccdp_origin,
         notary_addr: notary_addr(&cfg.notary_url)?,
-        exchange_permits: Arc::new(Semaphore::new(
-            routes::github_token::MAX_CONCURRENT_EXCHANGES,
-        )),
+        exchange_permits: Semaphore::new(routes::github_token::MAX_CONCURRENT_EXCHANGES),
         server_origin,
         callback_path,
     }))
+}
+
+/// The package-published CSP hash of the shell's stylesheet.
+///
+/// Spliced into a `Content-Security-Policy`, where `;` starts a new directive
+/// and the FIRST occurrence of a directive wins. An unchecked value carrying
+/// one does not merely break the policy -- it prepends its own `connect-src`
+/// and `frame-src` ahead of the intended ones, which are then ignored, and the
+/// shell can send the OAuth return anywhere. So the shape is exact: a hash
+/// algorithm the CSP grammar names, and base64 after it.
+fn style_hash(hash: &str) -> Result<()> {
+    if hash.is_empty() {
+        return Ok(());
+    }
+    let refuse = || Error::Config {
+        detail: format!(
+            "CALLBACK_STYLE_HASH {hash} is not a CSP hash source; it must be \
+             sha256-, sha384- or sha512- followed by base64"
+        ),
+    };
+    let b64 = ["sha256-", "sha384-", "sha512-"]
+        .iter()
+        .find_map(|p| hash.strip_prefix(p))
+        .ok_or_else(refuse)?;
+    if b64.is_empty()
+        || !b64
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+    {
+        return Err(refuse());
+    }
+    Ok(())
 }
 
 /// The closed list of CCDP versions the shell may select.
@@ -147,11 +184,11 @@ fn allowed_app_origins(list: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// The origin this service answers on, exactly as a browser spells it.
+/// The origin this bridge answers on, exactly as a browser spells it.
 ///
-/// The token route compares a request's `Origin` against this string, so
-/// anything a browser would not send refuses every legitimate call -- at
-/// runtime, on someone's ceremony, which is what parsing it here prevents.
+/// Every platform registers a `redirect_uri` built on this string, and a
+/// provider refuses an exchange whose two spellings differ -- at runtime, on
+/// someone's ceremony, which is what parsing it here prevents.
 /// `Url::origin` does the spelling: it lowercases the host and drops a default
 /// port, both of which browsers do too.
 ///
@@ -233,6 +270,15 @@ fn callback_path(path: &str) -> Result<String> {
             "carries a query, fragment, whitespace or control byte",
         ));
     }
+    // A byte a browser percent-encodes is a byte axum never sees: it matches on
+    // the raw path, so `/auth/cällback` registers one route and receives
+    // requests for another. The service would start and refuse every ceremony.
+    if !path.is_ascii() || path.chars().any(|c| "%\"<>\\^`|".contains(c)) {
+        return Err(refuse(
+            "carries a byte a browser would percent-encode, so the route it \
+             registers is not the one requests arrive at",
+        ));
+    }
     if routes::FIXED_PATHS.contains(&path) {
         return Err(refuse("collides with a route this service already serves"));
     }
@@ -258,19 +304,35 @@ fn notary_addr(url: &Url) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// A deployment that starts, with `args` replacing any default it names.
+    ///
+    /// Overriding rather than appending, because clap refuses a flag given
+    /// twice -- so a test that means "this one value differs" must not also
+    /// leave the default behind.
     fn config(args: &[&str]) -> config::Config {
-        let mut argv = vec![
-            "libid-server-rs",
-            "--allowed-app-origins",
-            "https://app.example",
-            "--ccdp-origin",
-            "https://ccdp.example",
-            "--ceremony-platforms",
-            r#"[{"id":"github","clientId":"Iv1.0123456789abcdef","versions":[1]}]"#,
-            "--gh-oauth-client-secret",
-            "ghs_secret",
+        let mut flags: Vec<(&str, &str)> = vec![
+            ("--allowed-app-origins", "https://app.example"),
+            ("--ccdp-origin", "https://ccdp.example"),
+            (
+                "--ceremony-platforms",
+                r#"[{"id":"github","clientId":"Iv1.0123456789abcdef","versions":[1]}]"#,
+            ),
+            ("--gh-oauth-client-secret", "ghs_secret"),
         ];
-        argv.extend_from_slice(args);
+        for pair in args.chunks(2) {
+            let [flag, value] = pair else {
+                panic!("test flags come in pairs, got {pair:?}")
+            };
+            match flags.iter_mut().find(|(f, _)| f == flag) {
+                Some(slot) => slot.1 = value,
+                None => flags.push((flag, value)),
+            }
+        }
+        let mut argv = vec!["libid-server-rs"];
+        for (flag, value) in &flags {
+            argv.push(flag);
+            argv.push(value);
+        }
         <config::Config as clap::Parser>::parse_from(argv)
     }
 
@@ -350,6 +412,109 @@ mod tests {
             state.github_oauth.as_ref().unwrap().redirect_uri,
             "https://id.example.com/auth/callback"
         );
+    }
+
+    /// Every one of these starts a process that then refuses real ceremonies,
+    /// which is the whole reason these run at startup rather than per request.
+    #[test]
+    fn a_deployment_that_could_not_serve_a_ceremony_stops_the_process() {
+        for (why, args) in [
+            ("no admitted origin", vec!["--allowed-app-origins", ""]),
+            (
+                "a duplicate admitted origin",
+                vec![
+                    "--allowed-app-origins",
+                    "https://app.example,https://app.example",
+                ],
+            ),
+            (
+                "a plaintext admitted origin that is not loopback",
+                vec!["--allowed-app-origins", "http://app.example"],
+            ),
+            ("no CCDP version", vec!["--ccdp-supported-versions", ""]),
+            (
+                "a duplicate CCDP version",
+                vec!["--ccdp-supported-versions", "1,1"],
+            ),
+            (
+                "a CCDP version that is not one",
+                vec!["--ccdp-supported-versions", "one"],
+            ),
+            (
+                "a relative callback path",
+                vec!["--callback-path", "auth/callback"],
+            ),
+            (
+                "a callback path axum reads as a pattern",
+                vec!["--callback-path", "/auth/{rest}"],
+            ),
+            (
+                "a callback path a browser would percent-encode",
+                vec!["--callback-path", "/auth/c\u{e4}llback"],
+            ),
+            (
+                "a callback path colliding with a fixed route",
+                vec!["--callback-path", "/api/v1/ceremony/config"],
+            ),
+            (
+                "a stylesheet hash that could forge a CSP directive",
+                vec!["--callback-style-hash", "x'; connect-src *; style-src 'x"],
+            ),
+            (
+                "a stylesheet hash of no named algorithm",
+                vec!["--callback-style-hash", "abc123"],
+            ),
+        ] {
+            assert!(
+                build_state(&config(&args)).is_err(),
+                "{why} must stop the process"
+            );
+        }
+    }
+
+    /// The secret and the platform that spends it travel together, or neither
+    /// is any use: a route mounted with no secret answers where it should not
+    /// exist, and a secret nothing can spend is a target with no purpose.
+    #[test]
+    fn the_github_secret_and_the_github_platform_require_each_other() {
+        let no_secret = vec!["--gh-oauth-client-secret", ""];
+        assert!(build_state(&config(&no_secret)).is_err());
+
+        let x_only = vec![
+            "--ceremony-platforms",
+            r#"[{"id":"x","clientId":"abc","versions":[1]}]"#,
+        ];
+        assert!(
+            build_state(&config(&x_only)).is_err(),
+            "a secret with no github platform must stop the process"
+        );
+
+        let neither = vec![
+            "--ceremony-platforms",
+            r#"[{"id":"x","clientId":"abc","versions":[1]}]"#,
+            "--gh-oauth-client-secret",
+            "",
+        ];
+        let state = build_state(&config(&neither)).unwrap();
+        assert!(state.github_oauth.is_none());
+    }
+
+    /// The one path that proves the router and the state agree -- and the only
+    /// one that would catch a configured callback path colliding with a fixed
+    /// route, which `Router::route` answers with a panic.
+    #[test]
+    fn a_valid_deployment_builds_a_router() {
+        let state = build_state(&config(&[])).unwrap();
+        let _: axum::Router = routes::build_router(&state).with_state(state);
+
+        let x_only = build_state(&config(&[
+            "--ceremony-platforms",
+            r#"[{"id":"x","clientId":"abc","versions":[1]}]"#,
+            "--gh-oauth-client-secret",
+            "",
+        ]))
+        .unwrap();
+        let _: axum::Router = routes::build_router(&x_only).with_state(x_only);
     }
 
     /// The default spelling, and the one the deployment uses.

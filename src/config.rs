@@ -18,7 +18,7 @@ use url::Url;
 /// it. They described a proof this service no longer verifies: the browser
 /// checks the notary's attestation itself, and the Platform Verifier checks it
 /// on chain. Nothing here reads a contract or a chain.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "libid-server-rs", version, about)]
 pub struct Config {
     /// Host to bind. Use 0.0.0.0 in containers.
@@ -29,10 +29,10 @@ pub struct Config {
     #[arg(long, env = "PORT", default_value = "8722")]
     pub port: u16,
 
-    /// Public base URL of THIS server, as a bare origin: scheme, host and, if
+    /// Public base URL of THIS bridge, as a bare origin: scheme, host and, if
     /// it is not the default, port. A path, query, fragment or credentials are
-    /// refused at startup, because the token route compares a request's
-    /// `Origin` against this and a browser sends none of them.
+    /// refused at startup, because this is the origin every registered
+    /// `redirect_uri` is built on and a browser sends none of them.
     ///
     /// HTTPS, unless the host is loopback: the bridge origin is a code-supply
     /// boundary for the callback shell, and a plaintext one is no boundary.
@@ -99,4 +99,28 @@ pub struct Config {
     /// business being set for a platform nobody can select.
     #[arg(long, env = "GH_OAUTH_CLIENT_SECRET", default_value = "")]
     pub gh_oauth_client_secret: String,
+}
+
+/// Written by hand, and without the secret.
+///
+/// `Debug` is the one thing that can take a client secret out of this process:
+/// a `dbg!`, a `tracing::debug!(?cfg)`, or a panic formatting the struct would
+/// put it in the log stream. `OAuthCredentials` derives only `Clone` for the
+/// same reason.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("base_url", &self.base_url)
+            .field("notary_url", &self.notary_url)
+            .field("allowed_app_origins", &self.allowed_app_origins)
+            .field("callback_path", &self.callback_path)
+            .field("ccdp_origin", &self.ccdp_origin)
+            .field("ccdp_supported_versions", &self.ccdp_supported_versions)
+            .field("callback_style_hash", &self.callback_style_hash)
+            .field("ceremony_platforms", &self.ceremony_platforms)
+            .field("gh_oauth_client_secret", &"<redacted>")
+            .finish()
+    }
 }

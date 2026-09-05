@@ -71,6 +71,26 @@ const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 /// a hole in the middle of it.
 const SECRET_FIELD: &str = "client_secret";
 
+/// [`TOKEN_URL`] parsed, and the authority to send as `Host`.
+///
+/// A `const` string cannot vary, so this either always parses or never does;
+/// doing it per request turned a startup-class error into a 502 at exchange
+/// time, on a branch no test could reach. `expect` is honest here: the input
+/// is a literal in this file, and a build in which it does not parse is a
+/// build that must not start.
+static TOKEN_ENDPOINT: std::sync::LazyLock<(hyper::Uri, String)> =
+    std::sync::LazyLock::new(|| {
+        let uri: hyper::Uri = TOKEN_URL
+            .parse()
+            .expect("the token endpoint is a valid URI");
+        let host = uri
+            .authority()
+            .expect("the token endpoint names a host")
+            .as_str()
+            .to_owned();
+        (uri, host)
+    });
+
 /// How long reaching the notary may take.
 ///
 /// Kept separate from the session budget below, and short: a notary that is
@@ -203,7 +223,10 @@ impl IntoResponse for TokenError {
     fn into_response(self) -> Response {
         (
             self.status,
-            [(header::CACHE_CONTROL, "no-store")],
+            [
+                (header::CACHE_CONTROL, "no-store"),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
             Json(serde_json::json!({ "message": self.message })),
         )
             .into_response()
@@ -248,8 +271,7 @@ pub async fn github_token(
     // unbounded queue is the same exhaustion with a longer fuse.
     let _permit = state
         .exchange_permits
-        .clone()
-        .try_acquire_owned()
+        .try_acquire()
         .map_err(|_| TokenError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: "too many exchanges in flight; retry shortly".into(),
@@ -266,7 +288,10 @@ pub async fn github_token(
 
     Ok((
         StatusCode::OK,
-        [(header::CACHE_CONTROL, "no-store")],
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
         Json(TokenResponseBody {
             access_token: response.access_token,
             token_attestation: AttestationBody {
@@ -345,21 +370,12 @@ fn token_http_request(
     creds: &OAuthCredentials,
     request: &TokenRequest,
 ) -> Result<hyper::Request<http_body_util::Full<bytes::Bytes>>, Error> {
-    let uri: hyper::Uri = TOKEN_URL.parse().map_err(|e| Error::Config {
-        detail: format!("token endpoint {TOKEN_URL}: {e}"),
-    })?;
-    let host = uri
-        .authority()
-        .ok_or_else(|| Error::Config {
-            detail: format!("token endpoint {TOKEN_URL} names no host"),
-        })?
-        .as_str()
-        .to_owned();
+    let (uri, host) = &*TOKEN_ENDPOINT;
 
     hyper::Request::builder()
         .method("POST")
-        .uri(uri)
-        .header(header::HOST, host)
+        .uri(uri.clone())
+        .header(header::HOST, host.as_str())
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .header(header::ACCEPT, "application/json")
         // The session ends when the exchange does. Without it the connection is
@@ -423,6 +439,13 @@ fn select_layouts(sent: &[u8], recv: &[u8]) -> Result<Selection, ceremony::Layou
     let sent_layout = ceremony::token_request(sent, Some(SECRET_FIELD))?;
     let recv_layout = ceremony::token_response(recv)?;
     let bearer = bearer_range(&recv_layout)?;
+    // `"access_token":""` frames an empty run, which the layout's complement
+    // never commits -- so no opening would match it, and the failure would
+    // surface as a notary fault. It is the same thing as no bearer at all, and
+    // it is GitHub's answer, not ours.
+    if bearer.is_empty() {
+        return Err(ceremony::LayoutError::MissingField("access_token".into()));
+    }
     // Read here, off the transcript the notary attests, and never off the
     // decoded response body. OAUTH_BRIDGE.md asks for the exact bearer the
     // attestation commits, and the two are not always the same string: a JSON
@@ -614,9 +637,7 @@ mod tests {
                 client_secret: client_secret.into(),
                 redirect_uri: "http://127.0.0.1:8722/auth/callback".into(),
             }),
-            exchange_permits: Arc::new(tokio::sync::Semaphore::new(
-                MAX_CONCURRENT_EXCHANGES,
-            )),
+            exchange_permits: tokio::sync::Semaphore::new(MAX_CONCURRENT_EXCHANGES),
         }
     }
 

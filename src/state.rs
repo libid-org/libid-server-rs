@@ -10,17 +10,18 @@
 //! It holds no signing key either. The notary signs; this service only carries
 //! what the notary said.
 
-use std::sync::Arc;
-
 use tokio::sync::Semaphore;
 
 use crate::oauth::OAuthCredentials;
 
 /// Configuration the request handlers read.
 pub struct AppState {
-    /// Where this service is reachable, as an exact origin. The GitHub token
-    /// route compares a request's `Origin` against it, so a value that differs
-    /// from what browsers actually send refuses every legitimate call.
+    /// Where this bridge is reachable, as an exact origin.
+    ///
+    /// It is what `redirectUri` is built on -- the URL every platform has
+    /// registered -- and nothing compares a request against it: the token
+    /// route admits the CCDP origin, because the prover that calls it runs
+    /// there.
     pub server_origin: String,
     /// The configured path the providers redirect back to, where the callback
     /// shell answers.
@@ -62,5 +63,5 @@ pub struct AppState {
     /// MPC-TLS sessions as it cares to start — the origin check is not caller
     /// authentication and says so. A request that finds no permit is shed,
     /// not queued.
-    pub exchange_permits: Arc<Semaphore>,
+    pub exchange_permits: Semaphore,
 }
