@@ -17,17 +17,49 @@
 //! only GitHub value this service holds outside that record — because a secret
 //! is the one thing the public configuration must never carry.
 
+use bytes::Bytes;
 use serde::Deserialize;
+use serde_json::{
+    json,
+    Map,
+    Value,
+};
 
 use crate::error::{
     Error,
     Result,
 };
 
-/// The platforms a ceremony can run against. Closed: a name outside it is a
-/// deployment naming something this service has no profile for, which is a
-/// startup error rather than an entry nobody will ever select.
-const CATALOG: [&str; 3] = ["google", "x", "github"];
+/// The platforms a ceremony can run against.
+///
+/// Closed as a type rather than checked against a list: serde refuses a name
+/// outside it while parsing, and names the whole catalog when it does. A
+/// `String` here would be a value every reader downstream has to take on
+/// faith, and one comparison spelled `== "github"` away from a platform that
+/// silently matches nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlatformId {
+    /// Google, whose profile returns its routing state in the fragment.
+    Google,
+    /// X.
+    X,
+    /// GitHub, the one platform whose token exchange is confidential and so
+    /// the one this service performs itself.
+    Github,
+}
+
+impl PlatformId {
+    /// The wire spelling, which is the key the public configuration uses and
+    /// the name an application selects by.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::X => "x",
+            Self::Github => "github",
+        }
+    }
+}
 
 /// GitHub's token service implements ceremony version 1 and nothing else, so
 /// the configuration must not advertise another: a browser that selected one
@@ -38,9 +70,9 @@ const GITHUB_ONLY_VERSION: u16 = 1;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PlatformProfile {
-    /// One of `google`, `x`, `github`. The catalog is closed: a name outside
-    /// it is a deployment naming something this service has no profile for.
-    pub id: String,
+    /// Which platform. The catalog is closed, so a name outside it is
+    /// refused while this record is parsed.
+    pub id: PlatformId,
     /// The public OAuth client identifier. Public — the browser sends it in
     /// the authorization request and the token request reveals it.
     pub client_id: String,
@@ -52,7 +84,7 @@ pub struct PlatformProfile {
 impl PlatformProfile {
     /// Whether this deployment enables the confidential GitHub exchange.
     pub fn is_github(&self) -> bool {
-        self.id == "github"
+        self.id == PlatformId::Github
     }
 }
 
@@ -73,27 +105,21 @@ pub fn platforms(json: &str) -> Result<Vec<PlatformProfile>> {
         return Err(refuse("names no platform, so no ceremony can run".into()));
     }
 
-    for (i, p) in profiles.iter().enumerate() {
-        if !CATALOG.contains(&p.id.as_str()) {
-            return Err(refuse(format!(
-                "[{i}] names {:?}, which is not one of {CATALOG:?}",
-                p.id
-            )));
-        }
+    for p in &profiles {
+        let id = p.id.as_str();
         if profiles.iter().filter(|q| q.id == p.id).count() > 1 {
-            return Err(refuse(format!("{} appears more than once", p.id)));
+            return Err(refuse(format!("{id} appears more than once")));
         }
         if p.client_id.is_empty() {
-            return Err(refuse(format!("{} carries no clientId", p.id)));
+            return Err(refuse(format!("{id} carries no clientId")));
         }
         if p.versions.is_empty() {
-            return Err(refuse(format!("{} advertises no version", p.id)));
+            return Err(refuse(format!("{id} advertises no version")));
         }
         for v in &p.versions {
             if p.versions.iter().filter(|w| *w == v).count() > 1 {
                 return Err(refuse(format!(
-                    "{} advertises version {v} more than once",
-                    p.id
+                    "{id} advertises version {v} more than once"
                 )));
             }
             if p.is_github() && *v != GITHUB_ONLY_VERSION {
@@ -105,6 +131,44 @@ pub fn platforms(json: &str) -> Result<Vec<PlatformProfile>> {
         }
     }
     Ok(profiles)
+}
+
+/// The public ceremony configuration, projected from the enabled set.
+///
+/// This is the projection the module doc names. The client id and the versions
+/// travel; nothing about artifacts does, because an application selects a
+/// platform and a version and never an artifact. The CCDP origin travels too:
+/// it is where the application sends the popup, and the one origin whose
+/// Callback this bridge's shell will import.
+fn record(redirect_uri: &str, ccdp_origin: &str, platforms: &[PlatformProfile]) -> Value {
+    let mut by_id = Map::new();
+    for p in platforms {
+        by_id.insert(
+            p.id.as_str().to_owned(),
+            json!({
+                "clientId": p.client_id,
+                "ceremonyVersions": p.versions,
+            }),
+        );
+    }
+    json!({
+        "redirectUri": redirect_uri,
+        "ccdpOrigin": ccdp_origin,
+        "platforms": Value::Object(by_id),
+    })
+}
+
+/// That record as the bytes it is served in, serialized once at startup.
+pub fn config_record(
+    redirect_uri: &str,
+    ccdp_origin: &str,
+    platforms: &[PlatformProfile],
+) -> Result<Bytes> {
+    serde_json::to_vec(&record(redirect_uri, ccdp_origin, platforms))
+        .map(Bytes::from)
+        .map_err(|e| Error::Config {
+            detail: format!("the ceremony configuration does not serialize: {e}"),
+        })
 }
 
 #[cfg(test)]

@@ -13,7 +13,10 @@ use axum::{
 use http_body_util::BodyExt;
 use libid_server_rs::{
     routes,
-    state::AppState,
+    state::{
+        AppState,
+        GithubExchange,
+    },
 };
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
@@ -27,11 +30,8 @@ fn state_with(permits: usize, github: bool) -> Arc<AppState> {
     let allowed_app_origins: Vec<String> =
         vec![APP_ORIGIN.into(), "https://wallet.example".into()];
     Arc::new(AppState {
-        server_origin: "http://127.0.0.1:8722".into(),
         callback_path: "/auth/callback".into(),
-        ccdp_origin: CCDP_ORIGIN.into(),
-        notary_addr: "127.0.0.1:7047".into(),
-        ceremony_config: routes::config::frozen(
+        ceremony_config: libid_server_rs::deployment::config_record(
             redirect_uri,
             CCDP_ORIGIN,
             &libid_server_rs::deployment::platforms(
@@ -50,12 +50,18 @@ fn state_with(permits: usize, github: bool) -> Arc<AppState> {
         )
         .unwrap(),
         allowed_app_origins,
-        github_oauth: github.then(|| libid_server_rs::oauth::OAuthCredentials {
-            client_id: "test-client-id".into(),
-            client_secret: "test-client-secret".into(),
-            redirect_uri: redirect_uri.into(),
+        github: github.then(|| {
+            Arc::new(GithubExchange {
+                credentials: libid_server_rs::oauth::OAuthCredentials {
+                    client_id: "test-client-id".into(),
+                    client_secret: "test-client-secret".into(),
+                    redirect_uri: redirect_uri.into(),
+                },
+                notary_addr: "127.0.0.1:7047".into(),
+                ccdp_origin: CCDP_ORIGIN.into(),
+                permits: Semaphore::new(permits),
+            })
         }),
-        exchange_permits: Semaphore::new(permits),
     })
 }
 
@@ -65,7 +71,7 @@ fn test_state() -> Arc<AppState> {
 }
 
 fn app(state: Arc<AppState>) -> axum::Router {
-    routes::build_router(&state).with_state(state)
+    routes::build_router(state)
 }
 
 #[tokio::test]
@@ -199,12 +205,12 @@ async fn github_token_refuses_a_body_carrying_a_schema() {
 }
 
 /// The prover runs on the CCDP Distribution and calls this route cross-origin,
-/// so the preflight is answered — naming exactly that origin, with `POST` and
-/// `Content-Type` and no credentials, and with no ceremony data in it. A page
-/// anywhere else, this bridge's own origin included, is told the same thing,
-/// which for it is a refusal.
+/// so the preflight is answered for that origin -- `POST`, `Content-Type`, no
+/// credentials, no ceremony data. Every other origin gets no allow-origin
+/// header at all: the layer filters rather than announcing a value and leaving
+/// the refusal to the browser.
 #[tokio::test]
-async fn the_token_preflight_is_answered_for_the_ccdp_origin_alone() {
+async fn the_token_preflight_admits_the_ccdp_origin_and_no_other() {
     for (origin, admitted) in [
         (CCDP_ORIGIN, true),
         ("http://127.0.0.1:8722", false),
@@ -220,29 +226,30 @@ async fn the_token_preflight_is_answered_for_the_ccdp_origin_alone() {
             .unwrap();
         let resp = app(test_state()).oneshot(req).await.unwrap();
         let h = resp.headers();
-        // The layer never echoes the caller. It names the one configured
-        // origin whoever asks, and a browser anywhere else compares that
-        // against its own origin and refuses on its side.
-        assert_eq!(h.get("access-control-allow-origin").unwrap(), CCDP_ORIGIN);
-        if !admitted {
-            assert_ne!(h.get("access-control-allow-origin").unwrap(), origin);
+        if admitted {
+            assert_eq!(h.get("access-control-allow-origin").unwrap(), CCDP_ORIGIN);
+            let methods = h
+                .get("access-control-allow-methods")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(methods.contains("POST"), "{methods}");
+            let headers = h
+                .get("access-control-allow-headers")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(
+                headers.to_ascii_lowercase().contains("content-type"),
+                "{headers}"
+            );
+            assert!(h.get("access-control-allow-credentials").is_none());
+        } else {
+            assert!(
+                h.get("access-control-allow-origin").is_none(),
+                "{origin} must get no allow-origin header"
+            );
         }
-        let methods = h
-            .get("access-control-allow-methods")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(methods.contains("POST"), "{methods}");
-        let headers = h
-            .get("access-control-allow-headers")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(
-            headers.to_ascii_lowercase().contains("content-type"),
-            "{headers}"
-        );
-        assert!(h.get("access-control-allow-credentials").is_none());
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(bytes.is_empty(), "a preflight carries no ceremony data");
     }
@@ -483,5 +490,47 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
     ] {
         let resp = get_shell(path, &[]).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+/// The contract says the token route's query is empty, and a query on a route
+/// that carries an authorization code is exactly what a proxy access log
+/// records by default. It is refused before a permit or a session is spent.
+#[tokio::test]
+async fn github_token_refuses_a_query() {
+    let req = Request::post("/api/v1/ceremony/github-token?trace=1")
+        .header("content-type", "application/json")
+        .header("origin", ORIGIN)
+        .body(Body::from(valid_body()))
+        .unwrap();
+    let resp = app(test_state()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// "Exactly `application/json`". The extractor alone would also admit any
+/// `application/*+json`, which is a wider door than the contract opens.
+#[tokio::test]
+async fn github_token_takes_exactly_one_media_type() {
+    for (media, ok) in [
+        ("application/json", true),
+        ("application/json; charset=utf-8", true),
+        ("application/vnd.libid+json", false),
+        ("text/plain", false),
+    ] {
+        let req = Request::post("/api/v1/ceremony/github-token")
+            .header("content-type", media)
+            .header("origin", ORIGIN)
+            .body(Body::from(valid_body()))
+            .unwrap();
+        let resp = app(test_state()).oneshot(req).await.unwrap();
+        if ok {
+            assert_ne!(
+                resp.status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{media} is the media type the contract names"
+            );
+        } else {
+            assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE, "{media}");
+        }
     }
 }

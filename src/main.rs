@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", cfg.host, cfg.port);
 
     let state = build_state(&cfg)?;
-    let app = routes::build_router(&state).with_state(state);
+    let app = routes::build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("libid-server-rs listening on {}", listener.local_addr()?);

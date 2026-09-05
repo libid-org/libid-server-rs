@@ -59,42 +59,60 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
     let ccdp_versions = ccdp_versions(&cfg.ccdp_supported_versions)?;
-    style_hash(&cfg.callback_style_hash)?;
+    let style_hash = style_hash(&cfg.callback_style_hash)?;
     let platforms = deployment::platforms(&cfg.ceremony_platforms)?;
 
-    let github = platforms.iter().find(|p| p.is_github());
-    if github.is_some() == cfg.gh_oauth_client_secret.is_empty() {
-        return Err(Error::Config {
-            detail: if github.is_some() {
-                "CEREMONY_PLATFORMS enables github, so GH_OAUTH_CLIENT_SECRET \
-                 must be set: the exchange is confidential or it is nothing"
-            } else {
-                "GH_OAUTH_CLIENT_SECRET is set but CEREMONY_PLATFORMS enables \
-                 no github, so nothing can ever spend it"
-            }
-            .into(),
-        });
-    }
+    // One decision, stated once. The XNOR this replaces asserted a boolean
+    // identity, then re-destructured it to pick an error message, then derived
+    // the same fact a third time to build the credentials.
+    let github = match (
+        platforms.iter().find(|p| p.is_github()),
+        cfg.gh_oauth_client_secret.as_str(),
+    ) {
+        (Some(profile), secret) if !secret.is_empty() => {
+            Some(Arc::new(state::GithubExchange {
+                credentials: oauth::OAuthCredentials {
+                    client_id: profile.client_id.clone(),
+                    client_secret: secret.to_owned(),
+                    redirect_uri: redirect_uri.clone(),
+                },
+                notary_addr: notary_addr(&cfg.notary_url)?,
+                ccdp_origin: ccdp_origin.clone(),
+                permits: Semaphore::new(routes::github_token::MAX_CONCURRENT_EXCHANGES),
+            }))
+        }
+        (None, "") => None,
+        (Some(_), _) => {
+            return Err(Error::Config {
+                detail: "CEREMONY_PLATFORMS enables github, so GH_OAUTH_CLIENT_SECRET \
+                         must be set: the exchange is confidential or it is nothing"
+                    .into(),
+            })
+        }
+        (None, _) => {
+            return Err(Error::Config {
+                detail: "GH_OAUTH_CLIENT_SECRET is set but CEREMONY_PLATFORMS enables \
+                         no github, so nothing can ever spend it"
+                    .into(),
+            })
+        }
+    };
 
     Ok(Arc::new(AppState {
-        github_oauth: github.map(|p| oauth::OAuthCredentials {
-            client_id: p.client_id.clone(),
-            client_secret: cfg.gh_oauth_client_secret.clone(),
-            redirect_uri: redirect_uri.clone(),
-        }),
-        ceremony_config: routes::config::frozen(&redirect_uri, &ccdp_origin, &platforms)?,
+        ceremony_config: deployment::config_record(
+            &redirect_uri,
+            &ccdp_origin,
+            &platforms,
+        )?,
         callback_shell: shell::callback(&shell::ShellInputs {
             ccdp_origin: &ccdp_origin,
             supported_versions: &ccdp_versions,
             allowed_app_origins: &allowed_app_origins,
-            style_hash: &cfg.callback_style_hash,
+            style_hash,
         })?,
         allowed_app_origins,
-        ccdp_origin,
-        notary_addr: notary_addr(&cfg.notary_url)?,
-        exchange_permits: Semaphore::new(routes::github_token::MAX_CONCURRENT_EXCHANGES),
-        server_origin,
         callback_path,
+        github,
     }))
 }
 
@@ -106,9 +124,9 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 /// and `frame-src` ahead of the intended ones, which are then ignored, and the
 /// shell can send the OAuth return anywhere. So the shape is exact: a hash
 /// algorithm the CSP grammar names, and base64 after it.
-fn style_hash(hash: &str) -> Result<()> {
+fn style_hash(hash: &str) -> Result<&str> {
     if hash.is_empty() {
-        return Ok(());
+        return Ok(hash);
     }
     let refuse = || Error::Config {
         detail: format!(
@@ -127,7 +145,7 @@ fn style_hash(hash: &str) -> Result<()> {
     {
         return Err(refuse());
     }
-    Ok(())
+    Ok(hash)
 }
 
 /// The closed list of CCDP versions the shell may select.
@@ -258,6 +276,17 @@ fn callback_path(path: &str) -> Result<String> {
     if !path.starts_with('/') {
         return Err(refuse("does not begin with `/`"));
     }
+    // `//x.example/cb` is a valid route to axum and a SCHEME-RELATIVE URL to a
+    // browser: `history.replaceState(null, '', location.pathname)` then
+    // resolves it cross-origin and throws, so the bootstrap dies before it
+    // clears -- the authorization code stays in the address bar and in
+    // history, nothing renders, and no server-side symptom exists at all.
+    if path.starts_with("//") {
+        return Err(refuse(
+            "begins with `//`, which a browser reads as scheme-relative, so \
+             the shell could not clear the return out of its own URL",
+        ));
+    }
     if path.contains(['{', '}']) {
         return Err(refuse(
             "contains a brace, which axum reads as a path pattern",
@@ -343,18 +372,19 @@ mod tests {
     #[test]
     fn the_redirect_uri_is_the_callback_route_under_the_base_url() {
         let state = build_state(&config(&["--base-url", "https://id.example/"])).unwrap();
-        assert_eq!(state.server_origin, "https://id.example");
         assert_eq!(
-            state.github_oauth.as_ref().unwrap().redirect_uri,
+            state.github.as_ref().unwrap().credentials.redirect_uri,
             "https://id.example/auth/callback"
         );
     }
 
-    /// The notary address is resolved once here rather than per ceremony.
+    /// The notary address is resolved once at startup rather than per
+    /// ceremony, so a URL that names no host or no port stops the process
+    /// instead of failing the first exchange that dials it.
     #[test]
-    fn the_state_carries_a_connectable_notary_address() {
+    fn a_notary_url_is_resolved_to_a_dialable_address_at_startup() {
         let state = build_state(&config(&[])).unwrap();
-        assert_eq!(state.notary_addr, "127.0.0.1:7047");
+        assert_eq!(state.github.as_ref().unwrap().notary_addr, "127.0.0.1:7047");
         assert!(build_state(&config(&["--notary-url", "tcp://notary.example"])).is_err());
     }
 
@@ -409,7 +439,7 @@ mod tests {
         let state =
             build_state(&config(&["--base-url", "https://ID.example.com:443/"])).unwrap();
         assert_eq!(
-            state.github_oauth.as_ref().unwrap().redirect_uri,
+            state.github.as_ref().unwrap().credentials.redirect_uri,
             "https://id.example.com/auth/callback"
         );
     }
@@ -496,7 +526,7 @@ mod tests {
             "",
         ];
         let state = build_state(&config(&neither)).unwrap();
-        assert!(state.github_oauth.is_none());
+        assert!(state.github.is_none());
     }
 
     /// The one path that proves the router and the state agree -- and the only
@@ -505,7 +535,7 @@ mod tests {
     #[test]
     fn a_valid_deployment_builds_a_router() {
         let state = build_state(&config(&[])).unwrap();
-        let _: axum::Router = routes::build_router(&state).with_state(state);
+        let _: axum::Router = routes::build_router(state);
 
         let x_only = build_state(&config(&[
             "--ceremony-platforms",
@@ -514,7 +544,7 @@ mod tests {
             "",
         ]))
         .unwrap();
-        let _: axum::Router = routes::build_router(&x_only).with_state(x_only);
+        let _: axum::Router = routes::build_router(x_only);
     }
 
     /// The default spelling, and the one the deployment uses.

@@ -24,7 +24,10 @@ use std::{
 };
 
 use axum::{
-    extract::State,
+    extract::{
+        RawQuery,
+        State,
+    },
     http::{
         header,
         HeaderMap,
@@ -58,7 +61,7 @@ use serde::{
 use crate::{
     error::Error,
     oauth::OAuthCredentials,
-    state::AppState,
+    state::GithubExchange,
 };
 
 /// GitHub's token endpoint. Pinned by the platform profile, never configured:
@@ -234,8 +237,9 @@ impl IntoResponse for TokenError {
 }
 
 /// `POST /api/v1/ceremony/github-token`.
-pub async fn github_token(
-    State(state): State<Arc<AppState>>,
+pub(crate) async fn github_token(
+    State(github): State<Arc<GithubExchange>>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Result<Json<TokenRequestBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, TokenError> {
@@ -248,10 +252,31 @@ pub async fn github_token(
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    if origin != state.ccdp_origin {
+    if origin != github.ccdp_origin {
         return Err(TokenError {
             status: StatusCode::FORBIDDEN,
             message: "this route is callable only from the configured CCDP origin".into(),
+        });
+    }
+
+    // The contract says the query is empty. It is also the field a proxy
+    // access log records by default, which is why a route carrying a code has
+    // no business having one.
+    if query.is_some_and(|q| !q.is_empty()) {
+        return Err(TokenError::bad_request("this route takes no query"));
+    }
+
+    // "Exactly `application/json`" -- axum's extractor also accepts any
+    // `application/*+json`, which is a wider door than the contract opens.
+    let media_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or_default().trim().to_owned())
+        .unwrap_or_default();
+    if media_type != "application/json" {
+        return Err(TokenError {
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            message: "this route takes exactly application/json".into(),
         });
     }
 
@@ -269,15 +294,12 @@ pub async fn github_token(
     // One permit, one session. Shed rather than queue: a caller told to come
     // back is better served than one held behind a queue it cannot see, and an
     // unbounded queue is the same exhaustion with a longer fuse.
-    let _permit = state
-        .exchange_permits
-        .try_acquire()
-        .map_err(|_| TokenError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: "too many exchanges in flight; retry shortly".into(),
-        })?;
+    let _permit = github.permits.try_acquire().map_err(|_| TokenError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "too many exchanges in flight; retry shortly".into(),
+    })?;
 
-    let response = exchange(&state, &request)
+    let response = exchange(&github, &request)
         .await
         .map_err(TokenError::from_exchange)?;
     // The bounds are checked on the way out as well as in: the three values are
@@ -366,10 +388,16 @@ fn layout_failed(e: &ceremony::LayoutError) -> libid_tlsn::Error {
 /// what the attested authority exists to catch. Omit it entirely and GitHub
 /// answers an error object, the response layout finds no `access_token` to
 /// anchor on, and the session fails somewhere that looks like a notary fault.
+///
+/// Total, and not a `Result`: the URI is a constant parsed once, the host is
+/// that URI's own authority, every header name and value is a literal, and the
+/// body is bytes. Nothing here comes from the request, so the builder has
+/// nothing to reject -- and a `Result` would be an error branch no input can
+/// reach, tested by nothing, that a reader has to rule out by hand.
 fn token_http_request(
     creds: &OAuthCredentials,
     request: &TokenRequest,
-) -> Result<hyper::Request<http_body_util::Full<bytes::Bytes>>, Error> {
+) -> hyper::Request<http_body_util::Full<bytes::Bytes>> {
     let (uri, host) = &*TOKEN_ENDPOINT;
 
     hyper::Request::builder()
@@ -385,9 +413,7 @@ fn token_http_request(
         .body(http_body_util::Full::new(bytes::Bytes::from(
             token_request_body(creds, request),
         )))
-        .map_err(|e| Error::Config {
-            detail: format!("token request: {e}"),
-        })
+        .expect("every part of this request is a constant or bytes")
 }
 
 /// The blinder that opens the committed bearer, picked out of everything the
@@ -499,16 +525,11 @@ async fn connect_notary(addr: &str) -> Result<tokio::net::TcpStream, Error> {
 
 /// Run the exchange inside one notarized session and assemble what it produced.
 async fn exchange(
-    state: &AppState,
+    github: &GithubExchange,
     request: &TokenRequest,
 ) -> Result<TokenResponse, Error> {
-    // The route is mounted only where GitHub is enabled, so this is a check
-    // against the router and the state disagreeing, not against a caller.
-    let creds = state.github_oauth.as_ref().ok_or_else(|| Error::Config {
-        detail: "the token route is mounted without a GitHub client".into(),
-    })?;
-    let http_request = token_http_request(creds, request)?;
-    let socket = connect_notary(&state.notary_addr).await?;
+    let http_request = token_http_request(&github.credentials, request);
+    let socket = connect_notary(&github.notary_addr).await?;
 
     // What the layout decided, kept from inside the session. The bearer's
     // offsets index the raw received transcript, so neither they nor the bytes
@@ -620,24 +641,14 @@ mod tests {
     /// few bytes away from the transcript a real session produces.
     const HEAD: &str = "POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\ncontent-type: application/x-www-form-urlencoded\r\naccept: application/json\r\nconnection: close\r\n";
 
-    fn state(client_secret: &str) -> AppState {
-        AppState {
-            server_origin: "http://127.0.0.1:8722".into(),
-            notary_addr: "127.0.0.1:7047".into(),
-            allowed_app_origins: vec!["http://localhost:3000".into()],
-            ceremony_config: bytes::Bytes::new(),
-            callback_path: "/auth/callback".into(),
-            ccdp_origin: "https://ccdp.example".into(),
-            callback_shell: crate::shell::RenderedShell {
-                body: bytes::Bytes::new(),
-                csp: axum::http::HeaderValue::from_static("default-src 'none'"),
-            },
-            github_oauth: Some(crate::oauth::OAuthCredentials {
-                client_id: "Iv1.0123456789abcdef".into(),
-                client_secret: client_secret.into(),
-                redirect_uri: "http://127.0.0.1:8722/auth/callback".into(),
-            }),
-            exchange_permits: tokio::sync::Semaphore::new(MAX_CONCURRENT_EXCHANGES),
+    /// The only part of the exchange state these tests read. The transcript
+    /// and its layout are a function of the credentials and the request, and
+    /// of nothing else the route holds -- so the fixture is the credentials.
+    fn credentials(client_secret: &str) -> crate::oauth::OAuthCredentials {
+        crate::oauth::OAuthCredentials {
+            client_id: "Iv1.0123456789abcdef".into(),
+            client_secret: client_secret.into(),
+            redirect_uri: "http://127.0.0.1:8722/auth/callback".into(),
         }
     }
 
@@ -649,8 +660,8 @@ mod tests {
     }
 
     /// What the session will see in the sent direction.
-    fn sent(state: &AppState, request: &TokenRequest) -> Vec<u8> {
-        let body = token_request_body(state.github_oauth.as_ref().unwrap(), request);
+    fn sent(credentials: &OAuthCredentials, request: &TokenRequest) -> Vec<u8> {
+        let body = token_request_body(credentials, request);
         format!("{HEAD}content-length: {}\r\n\r\n{body}", body.len()).into_bytes()
     }
 
@@ -659,8 +670,8 @@ mod tests {
     /// thing hidden — as a suffix, so the transcript still tiles.
     #[test]
     fn the_secret_is_the_only_thing_the_request_hides() {
-        let state = state("ghs_averyrealisticlookingclientsecret00");
-        let transcript = sent(&state, &request());
+        let credentials = credentials("ghs_averyrealisticlookingclientsecret00");
+        let transcript = sent(&credentials, &request());
         let layout = ceremony::token_request(&transcript, Some(SECRET_FIELD)).unwrap();
 
         assert_eq!(layout.reveal.len(), 1, "one revealed prefix");
@@ -686,14 +697,8 @@ mod tests {
         }
         assert!(
             !revealed
-                .windows(state.github_oauth.as_ref().unwrap().client_secret.len())
-                .any(|w| w
-                    == state
-                        .github_oauth
-                        .as_ref()
-                        .unwrap()
-                        .client_secret
-                        .as_bytes()),
+                .windows(credentials.client_secret.len())
+                .any(|w| w == credentials.client_secret.as_bytes()),
             "the secret is nowhere in what the notary is shown"
         );
     }
@@ -705,15 +710,15 @@ mod tests {
     #[test]
     fn a_secret_carrying_form_delimiters_cannot_forge_a_field() {
         let secret = "sk&client_secret=forged&scope=admin";
-        let state = state(secret);
-        let body = token_request_body(state.github_oauth.as_ref().unwrap(), &request());
+        let credentials = credentials(secret);
+        let body = token_request_body(&credentials, &request());
 
         let pairs: Vec<_> = url::form_urlencoded::parse(body.as_bytes()).collect();
         assert_eq!(pairs.len(), 5, "five fields, whatever the secret contains");
         assert_eq!(pairs[4].0, SECRET_FIELD);
         assert_eq!(pairs[4].1, secret, "and it round-trips unmangled");
 
-        let transcript = sent(&state, &request());
+        let transcript = sent(&credentials, &request());
         let layout = ceremony::token_request(&transcript, Some(SECRET_FIELD)).unwrap();
         assert_eq!(layout.reveal.len(), 1);
         assert!(
@@ -731,8 +736,8 @@ mod tests {
     /// record the notary signs over them.
     #[test]
     fn both_directions_of_the_session_tile() {
-        let state = state("ghs_averyrealisticlookingclientsecret00");
-        let sent = sent(&state, &request());
+        let credentials = credentials("ghs_averyrealisticlookingclientsecret00");
+        let sent = sent(&credentials, &request());
         let found = select_layouts(&sent, RECV).unwrap();
 
         for (layout, len, what) in [
@@ -770,8 +775,8 @@ mod tests {
     /// completed around an anchor that is not there.
     #[test]
     fn a_response_carrying_no_bearer_is_refused() {
-        let state = state("ghs_secret");
-        let sent = sent(&state, &request());
+        let credentials = credentials("ghs_secret");
+        let sent = sent(&credentials, &request());
         const ERROR: &[u8] =
             b"HTTP/1.1 200 OK\r\n\r\n{\"error\":\"bad_verification_code\"}";
         assert!(select_layouts(&sent, ERROR).is_err());
@@ -838,9 +843,8 @@ mod tests {
     /// somebody else's.
     #[test]
     fn the_request_names_the_host_the_session_authenticates() {
-        let state = state("ghs_secret");
-        let req =
-            token_http_request(state.github_oauth.as_ref().unwrap(), &request()).unwrap();
+        let credentials = credentials("ghs_secret");
+        let req = token_http_request(&credentials, &request());
 
         assert_eq!(req.method(), "POST");
         assert_eq!(req.uri(), TOKEN_URL);

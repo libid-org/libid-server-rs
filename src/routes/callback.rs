@@ -24,7 +24,7 @@ use axum::{
 use crate::state::AppState;
 
 /// `GET {callback path}`.
-pub async fn callback(State(state): State<Arc<AppState>>) -> Response {
+pub(crate) async fn callback(State(state): State<Arc<AppState>>) -> Response {
     (
         [
             // The application opened this window and must keep it through the

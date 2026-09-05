@@ -117,7 +117,7 @@ pub fn callback(inputs: &ShellInputs<'_>) -> Result<RenderedShell> {
 }
 
 /// Where a CCDP version's Callback module lives on the distribution.
-pub fn callback_module_url(ccdp_origin: &str, version: u16) -> String {
+fn callback_module_url(ccdp_origin: &str, version: u16) -> String {
     format!("{ccdp_origin}/ccdp/v{version}/callback.js")
 }
 

@@ -1,6 +1,12 @@
-//! Error types for the handles backend.
+//! What can go wrong, as the few shapes this service can actually produce.
+//!
+//! Every variant here has a producer. A variant with none is a failure mode
+//! the reader is invited to handle and the service never reaches, and a
+//! `#[from]` with none silently admits a whole foreign error type into this
+//! one the first time somebody writes `?` -- which is how an error nothing
+//! shaped reaches a caller.
 
-/// Errors from the handle-claim flow.
+/// A failure this service can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Configuration was missing or malformed.
@@ -42,21 +48,9 @@ pub enum Error {
         detail: String,
     },
 
-    /// Socket I/O failed.
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// JSON (de)serialization failed.
-    #[error("json: {0}")]
-    Json(#[from] serde_json::Error),
-
     /// The MPC-TLS session driver failed.
     #[error(transparent)]
     Tlsn(#[from] libid_tlsn::Error),
-
-    /// Transcript parsing or the notary wire protocol failed.
-    #[error(transparent)]
-    Transcript(#[from] libid_transcript::Error),
     // No signing variant: this service holds no key and signs nothing.
 }
 
