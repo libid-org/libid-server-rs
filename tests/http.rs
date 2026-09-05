@@ -10,64 +10,70 @@ use axum::{
         StatusCode,
     },
 };
+use clap::Parser;
 use http_body_util::BodyExt;
 use libid_server_rs::{
+    build_state,
+    config::Config,
     routes,
-    state::{
-        AppState,
-        GithubExchange,
-    },
+    state::AppState,
 };
-use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
 const APP_ORIGIN: &str = "http://localhost:3000";
 const CCDP_ORIGIN: &str = "https://ccdp.example";
+/// What `build_state` must derive from the base URL and the callback path.
+/// Written here as a literal precisely so the derivation has something to be
+/// checked against; the fixture no longer supplies it.
+const REDIRECT_URI: &str = "http://127.0.0.1:8722/auth/callback";
 
-/// The state carries no signing identity: the service holds no key.
-fn state_with(permits: usize, github: bool) -> Arc<AppState> {
-    let redirect_uri = "http://127.0.0.1:8722/auth/callback";
-    let allowed_app_origins: Vec<String> =
-        vec![APP_ORIGIN.into(), "https://wallet.example".into()];
-    Arc::new(AppState {
-        callback_path: "/auth/callback".into(),
-        ceremony_config: libid_server_rs::deployment::config_record(
-            redirect_uri,
-            CCDP_ORIGIN,
-            &libid_server_rs::deployment::platforms(
-                r#"[{"id":"github","clientId":"test-client-id","versions":[1]}]"#,
-            )
-            .unwrap(),
-        )
-        .unwrap(),
-        callback_shell: libid_server_rs::shell::callback(
-            &libid_server_rs::shell::ShellInputs {
-                ccdp_origin: CCDP_ORIGIN,
-                supported_versions: &[1],
-                allowed_app_origins: &allowed_app_origins,
-                style_hash: "",
-            },
-        )
-        .unwrap(),
-        allowed_app_origins,
-        github: github.then(|| {
-            Arc::new(GithubExchange {
-                credentials: libid_server_rs::oauth::OAuthCredentials {
-                    client_id: "test-client-id".into(),
-                    client_secret: "test-client-secret".into(),
-                    redirect_uri: redirect_uri.into(),
-                },
-                notary_addr: "127.0.0.1:7047".into(),
-                ccdp_origin: CCDP_ORIGIN.into(),
-                permits: Semaphore::new(permits),
-            })
-        }),
-    })
+/// A deployment, built the way the binary builds one.
+///
+/// Through `build_state` and not a struct literal, so every derivation this
+/// suite then makes assertions about -- the redirect URI joined from the
+/// origin and the callback path, the client id shared by the published record
+/// and the token request, the CCDP origin reaching the shell, the record and
+/// the token route's own gate -- is the one production performs. A hand-built
+/// fixture asserts the literals the fixture typed.
+///
+/// It also means no test can construct a deployment `build_state` would
+/// refuse, which is the only reason `build_router` may take an `AppState` and
+/// route a configured path without being able to fail.
+fn deployment(overrides: &[&str]) -> Arc<AppState> {
+    let mut flags: Vec<(&str, &str)> = vec![
+        ("--base-url", "http://127.0.0.1:8722"),
+        (
+            "--allowed-app-origins",
+            "http://localhost:3000,https://wallet.example",
+        ),
+        ("--ccdp-origin", CCDP_ORIGIN),
+        ("--notary-url", "tcp://127.0.0.1:7047"),
+        (
+            "--ceremony-platforms",
+            r#"[{"id":"github","clientId":"test-client-id","versions":[1]}]"#,
+        ),
+        ("--gh-oauth-client-secret", "test-client-secret"),
+    ];
+    for pair in overrides.chunks(2) {
+        let [flag, value] = pair else {
+            panic!("test flags come in pairs, got {pair:?}")
+        };
+        match flags.iter_mut().find(|(f, _)| f == flag) {
+            Some(slot) => slot.1 = value,
+            None => flags.push((flag, value)),
+        }
+    }
+    let mut argv = vec!["libid-server-rs"];
+    for (flag, value) in &flags {
+        argv.push(flag);
+        argv.push(value);
+    }
+    build_state(&Config::parse_from(argv)).expect("a deployment this suite can serve")
 }
 
-/// A state whose exchange ceiling is the default.
+/// The default deployment: GitHub enabled, the full exchange ceiling free.
 fn test_state() -> Arc<AppState> {
-    state_with(routes::github_token::MAX_CONCURRENT_EXCHANGES, true)
+    deployment(&[])
 }
 
 fn app(state: Arc<AppState>) -> axum::Router {
@@ -179,7 +185,15 @@ async fn github_token_sheds_when_no_permit_is_free() {
         .header("origin", ORIGIN)
         .body(Body::from(valid_body()))
         .unwrap();
-    let resp = app(state_with(0, true)).oneshot(req).await.unwrap();
+    // Held, not configured away: the ceiling is what production sets, and
+    // this is what a full one looks like from outside.
+    let state = test_state();
+    let github = state.github.clone().expect("github is enabled");
+    let _held = github
+        .permits
+        .try_acquire_many(libid_server_rs::state::MAX_CONCURRENT_EXCHANGES as u32)
+        .expect("every permit is free at the start of this test");
+    let resp = app(state).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
@@ -344,7 +358,7 @@ async fn config_carries_no_secret_and_no_admitted_origin() {
     assert_eq!(body["ccdpOrigin"], CCDP_ORIGIN);
 
     assert_eq!(
-        body["redirectUri"], "http://127.0.0.1:8722/auth/callback",
+        body["redirectUri"], REDIRECT_URI,
         "the record publishes the same redirect URI the token request sends"
     );
     assert_eq!(body["platforms"]["github"]["clientId"], "test-client-id");
@@ -379,7 +393,12 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
 /// answered without one would be worse than a path that is not there.
 #[tokio::test]
 async fn the_token_route_is_absent_when_github_is_not_enabled() {
-    let state = state_with(routes::github_token::MAX_CONCURRENT_EXCHANGES, false);
+    let state = deployment(&[
+        "--ceremony-platforms",
+        r#"[{"id":"x","clientId":"test-client-id","versions":[1]}]"#,
+        "--gh-oauth-client-secret",
+        "",
+    ]);
     let req = Request::post("/api/v1/ceremony/github-token")
         .header("content-type", "application/json")
         .header("origin", ORIGIN)
@@ -538,4 +557,78 @@ async fn github_token_takes_exactly_one_media_type() {
             assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE, "{media}");
         }
     }
+}
+
+/// The token route's CORS layer covers the token route and nothing else.
+///
+/// `Router::layer` wraps a sub-router's fallback as well as its routes, and
+/// `merge` carries that layered fallback out into the whole router. Applied
+/// that way here, every path this bridge does not serve answered a preflight
+/// advertising `POST` and handed the CCDP origin an allow-origin header on its
+/// 404 -- a route surface the contract closes, and the opposite of "unsupported
+/// methods fail without route work".
+#[tokio::test]
+async fn no_cors_reaches_a_path_this_bridge_does_not_serve() {
+    let resp = app(test_state())
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/does-not-exist")
+                .header("origin", CCDP_ORIGIN)
+                .header("access-control-request-method", "POST")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "a preflight for a path that does not exist is a 404, not an advertisement"
+    );
+    assert!(resp.headers().get("access-control-allow-methods").is_none());
+    assert!(resp.headers().get("access-control-allow-origin").is_none());
+
+    let resp = app(test_state())
+        .oneshot(
+            Request::get("/does-not-exist")
+                .header("origin", CCDP_ORIGIN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(
+        resp.headers().get("access-control-allow-origin").is_none(),
+        "a 404 grants the CCDP origin no CORS relationship"
+    );
+}
+
+/// A body over the ceiling is told so. `400` said only "your body is wrong",
+/// which made the limit this route sets invisible to the caller it is set for.
+#[tokio::test]
+async fn github_token_says_so_when_the_body_is_over_the_limit() {
+    let code = "a".repeat(16 * 1024);
+    let body = format!(r#"{{"code":"{code}","codeVerifier":"{VERIFIER}"}}"#);
+    let resp = post_token(Some(ORIGIN), body).await;
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// "Failure returns no partial credential, attestation, or caller-selected
+/// diagnostic content", says the contract. The extractor's own rejection text
+/// quotes the caller's field names and byte offsets, so it does not travel.
+#[tokio::test]
+async fn a_refusal_body_quotes_nothing_the_caller_sent() {
+    let body = format!(
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","zzMarkerFieldzz":1}}"#
+    );
+    let resp = post_token(Some(ORIGIN), body).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let text = body_of(resp).await.to_string();
+    assert!(
+        !text.contains("zzMarkerFieldzz"),
+        "the refusal echoed the caller's own field name: {text}"
+    );
+    assert!(!text.contains("line 1 column"), "nor its offsets: {text}");
 }

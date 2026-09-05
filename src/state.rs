@@ -2,10 +2,13 @@
 //!
 //! Everything here is configuration read once at startup. There is no ceremony
 //! state, no session, no challenge and no result: the ceremony lives in the
-//! browser, and this service answers one synchronous request at a time and
-//! remembers nothing about it. A timeout, a duplicate request, a restart or a
-//! lost response therefore leave no record, and recovery is a fresh ceremony
-//! rather than a lookup here.
+//! browser, and this service answers each request synchronously and in
+//! isolation, remembering nothing about it. Requests do run concurrently --
+//! the runtime is multi-threaded and up to [`MAX_CONCURRENT_EXCHANGES`]
+//! exchanges are in flight at once -- but no two share anything mutable, which
+//! is what "remembers nothing" buys. A timeout, a duplicate request, a restart
+//! or a lost response therefore leave no record, and recovery is a fresh
+//! ceremony rather than a lookup here.
 //!
 //! It holds no signing key either. The notary signs; this bridge only carries
 //! what the notary said.
@@ -15,6 +18,17 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::oauth::OAuthCredentials;
+
+/// How many exchanges may be in flight at once.
+///
+/// Each one is a full MPC-TLS session and an outbound request that spends the
+/// client secret. The origin check is not caller authentication -- it says so
+/// itself -- so without a ceiling an anonymous caller decides how much of this
+/// service, and of the OAuth app's standing with GitHub, to consume.
+///
+/// Here rather than in the route, beside the `Semaphore` it sizes: the number
+/// and the thing it is the size of are one fact.
+pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
 
 /// Everything the confidential exchange needs, and nothing any other route
 /// does.

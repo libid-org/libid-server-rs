@@ -159,16 +159,20 @@ fn record(redirect_uri: &str, ccdp_origin: &str, platforms: &[PlatformProfile]) 
 }
 
 /// That record as the bytes it is served in, serialized once at startup.
+///
+/// Total, and not a `Result`. Serializing a `serde_json::Value` into a `Vec`
+/// fails only on a map key that is not a string or a writer that errors, and
+/// this has neither: the keys are `String` and the writer is memory. A
+/// `Result` here would be an error branch no input can reach.
 pub fn config_record(
     redirect_uri: &str,
     ccdp_origin: &str,
     platforms: &[PlatformProfile],
-) -> Result<Bytes> {
-    serde_json::to_vec(&record(redirect_uri, ccdp_origin, platforms))
-        .map(Bytes::from)
-        .map_err(|e| Error::Config {
-            detail: format!("the ceremony configuration does not serialize: {e}"),
-        })
+) -> Bytes {
+    Bytes::from(
+        serde_json::to_vec(&record(redirect_uri, ccdp_origin, platforms))
+            .expect("a Value of string keys serializes into memory"),
+    )
 }
 
 #[cfg(test)]

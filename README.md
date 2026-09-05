@@ -54,10 +54,18 @@ out; origin checks and a closed input surface cannot constrain its owner.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness probe. Returns `OK`. |
+| `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
 | `GET` | `/api/v1/ceremony/config` | The public ceremony configuration. Readable only from an admitted application origin. |
 | `GET` | `{CALLBACK_PATH}` (default `/auth/callback`) | The registered OAuth callback shell: one document, identical for every request, that clears the provider's return and imports the Callback module from the CCDP Distribution. |
-| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin, whose preflight it answers. |
+| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin, whose preflight it answers. `403` for any other origin, `400` for a query, `415` for any media type but exactly `application/json`, in that order. |
+
+The contract's route surface is closed — "the bridge exposes only" the last
+three — so `/health` is a deliberate deviation, kept because the published
+image declares a `HEALTHCHECK` against it and an orchestrator needs somewhere
+to ask. It takes no ceremony input, reads nothing from the request and answers
+two bytes. It is also the one route that tolerates a query: a liveness probe
+that answered `400` to a cache-buster would report a healthy service as
+unhealthy and be restarted for it.
 
 ### `POST /api/v1/ceremony/github-token`
 
@@ -155,7 +163,7 @@ All settings come from environment variables (or the matching `--flag`).
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `PORT` | `8722` | Bind port. |
 | `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server, as a bare origin; HTTPS unless loopback. Every provider's registered callback URL must be exactly `{BASE_URL}{CALLBACK_PATH}`. |
-| `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins admitted to read the configuration. Exact origins, no patterns; HTTPS unless loopback; a duplicate is refused. |
+| `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins admitted to read the configuration. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. |
 | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
 | `CCDP_ORIGIN` | *(required)* | The CCDP Distribution this bridge selects: one origin serving `/ccdp/v{N}/callback.js` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and embedded in the shell. |
 | `CCDP_SUPPORTED_VERSIONS` | `1` | The closed list of CCDP versions the shell may import. |

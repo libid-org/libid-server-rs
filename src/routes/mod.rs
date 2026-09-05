@@ -42,15 +42,29 @@ use tower_http::cors::{
 
 use crate::state::AppState;
 
-/// Liveness probe.
+/// Liveness probe, and the one route the OAuth Bridge contract does not list.
 ///
-/// It carries `nosniff` like every other response here. The body is two bytes
-/// of ASCII and nothing an operator sends reaches it, so this is not a hole
-/// being closed -- it is the one route that would otherwise be the exception,
-/// and an exception is what a reader has to stop and account for.
+/// The contract's route surface is closed -- "the bridge exposes only" three
+/// routes -- and this is a fourth, kept deliberately: the published image
+/// declares a `HEALTHCHECK` against it and an orchestrator needs somewhere to
+/// ask. It is outside the ceremony surface rather than an addition to it: it
+/// takes no ceremony input, reads nothing from the request, and answers two
+/// bytes.
+///
+/// That is also why it is the one route that tolerates a query. The contract's
+/// "bridge routes accept no query" governs the three routes it enumerates; a
+/// liveness probe that answered `400` to a cache-buster would report a healthy
+/// service as unhealthy and be restarted for it.
+///
+/// The response policy is every other route's: `nosniff` so the two bytes
+/// cannot be sniffed into anything, and `no-store` so no cache answers on this
+/// service's behalf about whether it is alive.
 async fn health() -> impl axum::response::IntoResponse {
     (
-        [(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        [
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
         "OK",
     )
 }
@@ -93,7 +107,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 // executes -- the extractor runs first, whatever order the
                 // handler reads in.
                 .layer(DefaultBodyLimit::max(8 * 1024))
-                .layer(token_cors(&github.ccdp_origin))
+                // `route_layer`, not `layer`. `Router::layer` wraps the
+                // sub-router's FALLBACK as well as its routes, and `merge`
+                // carries that layered fallback out into the whole service --
+                // so every path this bridge does not serve would answer a
+                // preflight advertising `POST`, and hand the CCDP origin an
+                // allow-origin header on its 404. The contract closes that
+                // surface: "unsupported methods fail without route work".
+                // `route_layer` runs only where a route matched, which is this
+                // path and nothing else.
+                .route_layer(token_cors(&github.ccdp_origin))
                 .with_state(github.clone()),
         );
     }

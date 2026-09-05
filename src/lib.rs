@@ -1,10 +1,11 @@
 //! The OAuth Bridge of a libID ceremony.
 //!
-//! Three routes, and the contract is `OAUTH_BRIDGE.md` in the libid
-//! repository. It publishes the configuration an application starts from,
-//! serves the one callback document the OAuth platforms redirect back to, and
-//! performs the one exchange a browser cannot: GitHub's, which needs a client
-//! secret.
+//! Three contract routes and a liveness probe, and the contract is
+//! `OAUTH_BRIDGE.md` in the libid repository. It publishes the configuration
+//! an application starts from, serves the one callback document the OAuth
+//! platforms redirect back to, and performs the one exchange a browser cannot:
+//! GitHub's, which needs a client secret. `/health` is the fourth, outside the
+//! contract's closed surface and kept for the container healthcheck.
 //!
 //! Everything the browser executes after that callback -- the Callback module
 //! it imports, Airlock, the prover, its circuits and notarization client -- is
@@ -61,6 +62,10 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let ccdp_versions = ccdp_versions(&cfg.ccdp_supported_versions)?;
     let style_hash = style_hash(&cfg.callback_style_hash)?;
     let platforms = deployment::platforms(&cfg.ceremony_platforms)?;
+    // A constant that either always parses or never does, parsed here so a
+    // build in which it does not fails at startup rather than on the first
+    // ceremony that reaches it.
+    routes::github_token::force_token_endpoint();
 
     // One decision on the pair, and each arm is a whole answer: the exchange
     // this deployment can perform, the deployment that performs none, or the
@@ -78,7 +83,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                 },
                 notary_addr: notary_addr(&cfg.notary_url)?,
                 ccdp_origin: ccdp_origin.clone(),
-                permits: Semaphore::new(routes::github_token::MAX_CONCURRENT_EXCHANGES),
+                permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
         }
         (None, "") => None,
@@ -103,7 +108,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             &redirect_uri,
             &ccdp_origin,
             &platforms,
-        )?,
+        ),
         callback_shell: shell::callback(&shell::ShellInputs {
             ccdp_origin: &ccdp_origin,
             supported_versions: &ccdp_versions,
@@ -181,7 +186,20 @@ fn allowed_app_origins(list: &str) -> Result<Vec<String>> {
         .filter(|s| !s.is_empty())
         .enumerate()
     {
-        let origin = canonical_origin(&format!("ALLOWED_APP_ORIGINS[{i}]"), spelling)?;
+        let field = format!("ALLOWED_APP_ORIGINS[{i}]");
+        let origin = canonical_origin(&field, spelling)?;
+        // "A duplicate or invalid member is a deployment error rather than
+        // something the bridge normalizes", says the contract of this list
+        // specifically. So a member that is not already canonical is refused
+        // here, where an operator can see which one and what it should say,
+        // rather than quietly admitted under a spelling they did not write.
+        if origin != spelling {
+            return Err(Error::Config {
+                detail: format!(
+                    "{field} {spelling} is not canonical; write it as {origin}"
+                ),
+            });
+        }
         // A duplicate is refused, not folded: the contract says a duplicate
         // member is a deployment error rather than something the bridge
         // normalizes, and a list written twice is a list nobody is reading.
@@ -567,6 +585,22 @@ mod tests {
                 "an admitted origin whose host carries a CSP keyword quote",
                 vec!["--allowed-app-origins", "https://a'b.example"],
             ),
+            // The contract singles this list out: "a duplicate or invalid
+            // member is a deployment error rather than something the bridge
+            // normalizes". So each of these is refused with the canonical
+            // spelling named, where `BASE_URL` would be folded.
+            (
+                "an admitted origin carrying a trailing slash",
+                vec!["--allowed-app-origins", "https://app.example/"],
+            ),
+            (
+                "an admitted origin spelled with an uppercase host",
+                vec!["--allowed-app-origins", "https://APP.example"],
+            ),
+            (
+                "an admitted origin carrying a default port",
+                vec!["--allowed-app-origins", "https://app.example:443"],
+            ),
         ] {
             assert!(
                 build_state(&config(&args)).is_err(),
@@ -627,11 +661,14 @@ mod tests {
         assert!(state.github.is_none());
     }
 
-    /// `Router::route` answers a duplicate path with a panic, and a
-    /// deployment would meet that by failing to start with nothing saying
-    /// which setting did it. `callback_path` refuses the collision first, and
-    /// this is what proves the two agree -- for the deployment that mounts the
-    /// token route and for the one that does not.
+    /// Every path this router mounts, actually mounted -- for the deployment
+    /// that carries the token route and the one that does not.
+    ///
+    /// It does NOT exercise a collision: `callback_path` refuses one before
+    /// `build_router` is reached, and that refusal is covered in the startup
+    /// table above. What this catches is a path `build_router` mounts that
+    /// `FIXED_PATHS` does not name, which `Router::route` answers with a panic
+    /// the moment a deployment configures the callback there.
     #[test]
     fn building_the_router_for_a_configured_deployment_does_not_panic() {
         let state = build_state(&config(&[])).unwrap();

@@ -11,12 +11,11 @@ publish = false
 
 [dependencies]
 # ── libid-rs shared crates ──────────────────────────────────────────────
-# All four pinned to the same release tag of the git repo. Three of them are
-# also on crates.io, but libid-tlsn is git-only (its upstream `tlsn` dep is
-# not on crates.io) and its API exposes libid-transcript types — mixing the
-# registry copies with the git copy puts two incompatible versions of the
-# same types in the graph. One source, one tag, until libid-tlsn can be
-# published.
+# Three crates, one source, one revision. Two of them are also on crates.io,
+# but libid-tlsn is git-only (its upstream `tlsn` dep is not on crates.io) and
+# its API exposes libid-transcript types — mixing the registry copies with the
+# git copy puts two incompatible versions of the same types in the graph. One
+# source until libid-tlsn can be published.
 #
 # libid-signer is deliberately absent, and with it the AWS SDK: this service
 # holds no signing key. Nothing else here needs it — the notary digest is

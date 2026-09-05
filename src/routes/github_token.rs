@@ -94,6 +94,16 @@ static TOKEN_ENDPOINT: std::sync::LazyLock<(hyper::Uri, String)> =
         (uri, host)
     });
 
+/// Parse the token endpoint now, so a build in which it does not parse fails
+/// where the doc above says it does.
+///
+/// `LazyLock` defers to first use, and the first use is inside an exchange --
+/// which would turn a startup-class error into a panic on somebody's ceremony.
+/// `build_state` calls this.
+pub(crate) fn force_token_endpoint() {
+    std::sync::LazyLock::force(&TOKEN_ENDPOINT);
+}
+
 /// How long reaching the notary may take.
 ///
 /// Kept separate from the session budget below, and short: a notary that is
@@ -120,14 +130,6 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 /// until the process restarts, which is the failure the budget above exists to
 /// rule out.
 const RECORD_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How many exchanges may be in flight at once.
-///
-/// Each one is a full MPC-TLS session and an outbound request that spends the
-/// client secret. The origin check is not caller authentication -- it says so
-/// itself -- so without a ceiling an anonymous caller decides how much of this
-/// service, and of the OAuth app's standing with GitHub, to consume.
-pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
 
 /// What the browser sends. Nothing else: this service uses only its own
 /// compiled client, secret, redirect URI, endpoint and notary, and accepts no
@@ -206,6 +208,7 @@ impl TokenError {
                         .into(),
                 }
             }
+            Error::Tlsn(e) => Self::foreign(&e),
             other => Self::upstream(other),
         }
     }
@@ -214,13 +217,48 @@ impl TokenError {
     /// the exchange failed and nothing about this service's configuration, its
     /// notary, or which step of the session refused it.
     ///
-    /// Logging it whole is safe in the other direction too. Nothing the caller
-    /// sends reaches a `Display` here: every `detail` is a literal, an io
-    /// error, or a length and an index -- the bounds errors carry the position
-    /// of a bad byte and never the bytes -- so there is no line for a crafted
-    /// `code` to forge and no credential for a log to spill.
+    /// What is logged is this crate's own `Display` and never a foreign one.
+    /// Every `detail` written here is a literal, an io error, or a length and
+    /// an index. `Error::Tlsn` is not: the session driver builds one of its
+    /// details as `format!("API returned {status}: {body}")`, so GitHub's whole
+    /// response body rides in it -- and the contract says platform-return
+    /// values never enter logs, without exception. This service cannot tell
+    /// which half of that string is its own, so it logs neither, and says how
+    /// many bytes it withheld instead.
+    ///
+    /// That costs real diagnosis, and the cost is stated rather than hidden:
+    /// GitHub's status is INSIDE the withheld text, so a notary handshake
+    /// failure and a `403` from the token endpoint now write the same line.
+    /// Recovering the status needs the upstream variant to carry it apart from
+    /// the body, which is the fix -- here it can only be withheld whole or
+    /// leaked whole.
     fn upstream(cause: impl std::fmt::Display) -> Self {
         tracing::error!(%cause, "github token exchange failed");
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: "token exchange failed".into(),
+        }
+    }
+
+    /// The same refusal for a cause this service did not author.
+    ///
+    /// Kept apart from [`Self::upstream`] because the two differ in exactly
+    /// one way that matters: whether the text is safe to write down.
+    fn foreign(cause: &libid_tlsn::Error) -> Self {
+        let (kind, withheld) = match cause {
+            libid_tlsn::Error::MpcTlsFailed { detail } => ("MPC-TLS", detail.len()),
+            libid_tlsn::Error::UnsupportedTlsVersion { detail } => {
+                ("TLS version", detail.len())
+            }
+            libid_tlsn::Error::Io(e) => ("session io", e.to_string().len()),
+            libid_tlsn::Error::Transcript(e) => ("transcript", e.to_string().len()),
+        };
+        tracing::error!(
+            kind,
+            withheld_bytes = withheld,
+            "github token exchange failed; the session driver's detail may quote \
+             the platform response and is not logged"
+        );
         Self {
             status: StatusCode::BAD_GATEWAY,
             message: "token exchange failed".into(),
@@ -288,7 +326,32 @@ pub(crate) async fn github_token(
 
     // Malformed JSON fails before a session is opened and before the secret is
     // spent.
-    let Json(body) = body.map_err(|e| TokenError::bad_request(e.body_text()))?;
+    //
+    // Two things the extractor gets wrong for this route.
+    //
+    // Its text: `body_text()` embeds the caller's own field names and byte
+    // offsets, and the contract says a failure returns no caller-selected
+    // diagnostic content. So the message is this route's, and fixed.
+    //
+    // Its status, in one direction only. A body over the ceiling set on this
+    // route came back as `400`, which made that ceiling invisible to the
+    // caller it exists for -- `413` says retry is pointless. Deferred to the
+    // rejection for that case alone, because `BytesRejection` covers both the
+    // length limit and a body that simply would not read, and only the first
+    // is a `413`. Everything else stays `400`, including the `422` axum
+    // answers a well-formed body with the wrong fields: the contract fixes no
+    // failure status, a caller can act on neither differently, and `400` is
+    // what this route has always answered.
+    let Json(body) = body.map_err(|e| {
+        let status = match &e {
+            axum::extract::rejection::JsonRejection::BytesRejection(_) => e.status(),
+            _ => StatusCode::BAD_REQUEST,
+        };
+        TokenError {
+            status,
+            message: "the request body is not a TokenRequest".into(),
+        }
+    })?;
     let request = TokenRequest {
         code: body.code,
         code_verifier: body.code_verifier,
@@ -425,9 +488,12 @@ fn token_http_request(
 /// The blinder that opens the committed bearer, picked out of everything the
 /// session committed.
 ///
-/// Matched on the range it covers rather than taken by position: nothing
-/// upstream promises the openings arrive in the order the layouts stated them,
-/// and the wrong blinder opens nothing while looking like an answer.
+/// Matched on the range it covers rather than taken by position. Upstream does
+/// document the order -- `commitment_openings` is "one opening per commitment
+/// this session made, in the order the layouts stated them" -- but that is a
+/// doc comment over a `Vec`, not an invariant anything checks, and the wrong
+/// blinder opens nothing while looking like an answer. Matching on the range
+/// costs a comparison and does not depend on the promise holding.
 ///
 /// Exactly one must match. None means the session did not commit what the
 /// layout said it would; more than one means the bearer is not identified by
@@ -735,11 +801,32 @@ mod tests {
         let transcript = sent(&credentials, &request());
         let layout = ceremony::token_request(&transcript, Some(SECRET_FIELD)).unwrap();
         assert_eq!(layout.reveal.len(), 1);
+
+        // Searched for as it appears ON THE WIRE. The raw bytes of a secret
+        // carrying `&` or `=` occur nowhere in a percent-encoded body, so an
+        // assertion against those would hold for any layout at all -- including
+        // one that revealed the whole transcript.
+        let at = body.find(SECRET_FIELD).unwrap() + SECRET_FIELD.len() + 1;
+        let on_the_wire = &body.as_bytes()[at..];
         assert!(
-            !transcript[layout.reveal[0].clone()]
-                .windows(secret.len())
-                .any(|w| w == secret.as_bytes()),
-            "the whole secret is still committed, delimiters and all"
+            on_the_wire.starts_with(b"sk%26client_secret%3D"),
+            "percent-encoded"
+        );
+        let at = transcript
+            .windows(on_the_wire.len())
+            .position(|w| w == on_the_wire)
+            .expect("the encoded secret is in the transcript this session sends");
+        let encoded = at..at + on_the_wire.len();
+        assert!(
+            layout.reveal[0].end <= encoded.start,
+            "the revealed prefix stops before the secret"
+        );
+        assert!(
+            layout
+                .commit
+                .iter()
+                .any(|c| c.start <= encoded.start && encoded.end <= c.end),
+            "and a committed range covers it whole"
         );
     }
 
@@ -1003,28 +1090,99 @@ mod tests {
         );
     }
 
-    /// Every other layout refusal is this service, the notary or a response
-    /// nobody can describe -- and the caller can only try again later.
+    /// A response carrying no `access_token` anchor at all is the same
+    /// refusal as one carrying an empty value, and both are answered the same
+    /// way: GitHub had no bearer for this code, so the caller gets a `400` and
+    /// is told to start a fresh ceremony.
+    ///
+    /// Every OTHER layout refusal is this service, the notary, or a transcript
+    /// nobody can describe, and the caller can only try again later. That is
+    /// the half `NoHeadBoundary` stands for here.
     #[test]
-    fn a_response_with_no_access_token_field_at_all_is_not_the_callers_to_fix() {
+    fn a_missing_access_token_is_a_refused_code_and_every_other_refusal_is_not() {
         let credentials = credentials("ghs_secret");
         let sent = sent(&credentials, &request());
-        let recv = b"HTTP/1.1 500 Internal Server Error\r\n\r\n{}";
+        let recv = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"error\":\"bad_verification_code\"}";
 
         let Err(refusal) = select_layouts(&sent, recv) else {
             panic!("a response with no bearer must not produce a selection")
         };
-        // A missing anchor and an empty value are the same `LayoutError`, and
-        // both mean GitHub had no bearer for this code.
-        assert!(platform_refusal(Some(&refusal)).is_some());
-        // A refusal of any other shape is not, and is answered as upstream.
-        let other = ceremony::LayoutError::NoHeadBoundary;
-        assert!(platform_refusal(Some(&other)).is_none());
+        let told = platform_refusal(Some(&refusal)).expect("a platform refusal");
+        assert_eq!(
+            TokenError::from_exchange(told).status,
+            StatusCode::BAD_REQUEST,
+            "no access_token is a spent or forged code, which the caller can act on"
+        );
+
+        // And nothing else is. A layout that would not form for any other
+        // reason is this service's or the notary's, and says so with a 502.
+        for other in [
+            ceremony::LayoutError::NoHeadBoundary,
+            ceremony::LayoutError::MissingCredential,
+            ceremony::LayoutError::MissingHeader("host"),
+        ] {
+            assert!(
+                platform_refusal(Some(&other)).is_none(),
+                "{other} is not the caller's to fix"
+            );
+        }
         assert!(platform_refusal(None).is_none());
+        assert_eq!(
+            TokenError::upstream("anything at all").status,
+            StatusCode::BAD_GATEWAY
+        );
 
         // Restated for the session driver, it says a transcript was refused
         // and carries the reason, not a second guess at whose fault it is.
         let restated = layout_failed(&refusal);
         assert!(restated.to_string().contains("access_token"), "{restated}");
+    }
+
+    /// "Credentials and OAuth-platform-return values never enter logs", says
+    /// the contract, without exception. The session driver builds one of its
+    /// details as `format!("API returned {status}: {body}")`, so GitHub's whole
+    /// response body rides inside a `libid_tlsn::Error` -- and this service
+    /// cannot tell which half of that string is its own. So none of it is
+    /// logged, and none of it reaches the caller either.
+    #[test]
+    fn a_foreign_cause_is_answered_without_repeating_a_word_of_it() {
+        const MARKER: &str = "zzPLATFORMBODYzz";
+        for cause in [
+            libid_tlsn::Error::MpcTlsFailed {
+                detail: format!("API returned 403: {MARKER}"),
+            },
+            libid_tlsn::Error::UnsupportedTlsVersion {
+                detail: MARKER.into(),
+            },
+            libid_tlsn::Error::Io(std::io::Error::other(MARKER)),
+            libid_tlsn::Error::Transcript(libid_transcript::Error::Transcript {
+                detail: MARKER.into(),
+            }),
+        ] {
+            // The detail carries the marker, so a route that repeated it would
+            // fail this rather than pass by accident.
+            assert!(cause.to_string().contains(MARKER), "{cause}");
+
+            let refusal = TokenError::from_exchange(Error::Tlsn(cause));
+            assert_eq!(refusal.status, StatusCode::BAD_GATEWAY);
+            assert!(
+                !refusal.message.contains(MARKER),
+                "the refusal repeated the platform body: {}",
+                refusal.message
+            );
+            assert_eq!(refusal.message, "token exchange failed");
+        }
+    }
+
+    /// And the causes this service authors itself are logged whole, because
+    /// every one of them is a literal, an io error, or a length and an index.
+    #[test]
+    fn a_cause_this_service_authored_is_still_answered_as_upstream() {
+        let refusal = TokenError::from_exchange(Error::NotaryConnect {
+            addr: "127.0.0.1:7047".into(),
+            detail: "connection refused".into(),
+        });
+        assert_eq!(refusal.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(refusal.message, "token exchange failed");
     }
 }
