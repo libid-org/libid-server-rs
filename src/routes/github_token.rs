@@ -208,6 +208,18 @@ impl TokenError {
                         .into(),
                 }
             }
+            // Not `upstream`: this one names a fault an operator can fix, and
+            // it is this service's own sentence, so it is safe to write whole.
+            Error::PlatformMisconfigured { .. } => {
+                tracing::error!(
+                    %cause,
+                    "every ceremony on this deployment will fail until this is fixed"
+                );
+                Self {
+                    status: StatusCode::BAD_GATEWAY,
+                    message: "token exchange failed".into(),
+                }
+            }
             Error::Tlsn(e) => Self::foreign(&e),
             other => Self::upstream(other),
         }
@@ -562,20 +574,49 @@ fn select_layouts(sent: &[u8], recv: &[u8]) -> Result<Selection, ceremony::Layou
     })
 }
 
+/// The error code GitHub returns for a code that was spent, replayed or never
+/// valid. The one refusal in its catalogue that the caller can act on.
+const BAD_CODE: &[u8] = b"bad_verification_code";
+
 /// GitHub answering the exchange with an error object rather than a bearer.
 ///
-/// A spent, replayed or forged code lands here, and it is the caller's to fix
-/// rather than this service's or the notary's: the session ran, the response
-/// arrived, and it carried no `access_token` for the layout to anchor on. Told
-/// apart from every other session failure because the two deserve different
-/// answers — one says come back with a fresh code, the other says something
-/// here is broken.
-fn platform_refusal(refusal: Option<&ceremony::LayoutError>) -> Option<Error> {
-    matches!(refusal, Some(ceremony::LayoutError::MissingField(f)) if f == "access_token")
-        .then(|| Error::OAuthFailed {
+/// The session ran and the response arrived carrying no `access_token` for the
+/// layout to anchor on. WHOSE fault that is decides the answer, and GitHub
+/// returns `200` for every one of them, so the status cannot decide it.
+///
+/// `bad_verification_code` is the caller's: a double-clicked button, a reloaded
+/// callback, a stale link. Every other code in that catalogue --
+/// `incorrect_client_credentials`, `redirect_uri_mismatch` -- is this
+/// deployment, broken for everybody until a setting changes. Answering those
+/// as the caller's would tell every user to retry something that cannot
+/// succeed, and leave nothing above `warn` in the log while it happened.
+///
+/// The unrecognised case is treated as the deployment's. A caller told to come
+/// back later when the code was merely spent costs one retry; an operator not
+/// told their credentials are rejected costs the whole deployment.
+fn platform_refusal(
+    refusal: Option<&ceremony::LayoutError>,
+    names_bad_code: bool,
+) -> Option<Error> {
+    if !matches!(refusal, Some(ceremony::LayoutError::MissingField(f)) if f == "access_token")
+    {
+        return None;
+    }
+    Some(if names_bad_code {
+        Error::OAuthFailed {
             platform: "github".into(),
             detail: "the token endpoint returned no access_token".into(),
-        })
+        }
+    } else {
+        Error::PlatformMisconfigured {
+            platform: "github".into(),
+            detail: "the token endpoint refused with an error that is not a bad \
+                     verification code; check GH_OAUTH_CLIENT_SECRET and that the \
+                     registered callback URL is exactly this deployment's redirect \
+                     URI"
+            .into(),
+        }
+    })
 }
 
 /// Open the session the notary answers on.
@@ -611,6 +652,10 @@ async fn exchange(
     // `prover_generic` propagates says a transcript was refused, not which of
     // the two parties has something to fix.
     let mut refusal: Option<ceremony::LayoutError> = None;
+    // Whose refusal it was, decided here because this is the only place the
+    // received transcript exists. Read, never kept: what survives the closure
+    // is one bit, and this service's own words are what get logged.
+    let mut names_bad_code = false;
 
     // The layouts state what this session discloses, and each direction's
     // commitments are the complement of its reveals — so the transcript tiles
@@ -632,6 +677,7 @@ async fn exchange(
                     Ok((sent, recv))
                 }
                 Err(e) => {
+                    names_bad_code = recv.windows(BAD_CODE.len()).any(|w| w == BAD_CODE);
                     let failed = layout_failed(&e);
                     refusal = Some(e);
                     Err(failed)
@@ -648,7 +694,8 @@ async fn exchange(
     let mut result = match session {
         Ok(result) => result,
         Err(e) => {
-            return Err(platform_refusal(refusal.as_ref()).unwrap_or_else(|| e.into()))
+            return Err(platform_refusal(refusal.as_ref(), names_bad_code)
+                .unwrap_or_else(|| e.into()))
         }
     };
 
@@ -883,20 +930,56 @@ mod tests {
         assert!(select_layouts(&sent, ERROR).is_err());
     }
 
-    /// A response with no bearer is GitHub refusing the code — a spent one, a
-    /// replayed one, one for another client. The caller can act on that, so it
-    /// gets a 4xx and a log line at warn, not a 502 and an incident.
+    /// GitHub answers `200` to a spent code AND to a wrong client secret, so
+    /// the status tells the two apart from nothing. The error code does, and
+    /// the two deserve opposite answers: one caller retries, the other means
+    /// every ceremony on this deployment fails until somebody changes a
+    /// setting.
     #[test]
-    fn a_refused_code_is_told_apart_from_a_broken_session() {
+    fn a_refused_code_and_a_broken_deployment_are_not_the_same_answer() {
         let refused = ceremony::LayoutError::MissingField("access_token".into());
-        assert!(matches!(
-            platform_refusal(Some(&refused)),
-            Some(Error::OAuthFailed { .. })
-        ));
+
+        let callers = platform_refusal(Some(&refused), true).unwrap();
+        assert!(matches!(callers, Error::OAuthFailed { .. }));
         assert_eq!(
-            TokenError::from_exchange(platform_refusal(Some(&refused)).unwrap()).status,
-            StatusCode::BAD_REQUEST
+            TokenError::from_exchange(callers).status,
+            StatusCode::BAD_REQUEST,
+            "a spent code is the caller's to fix"
         );
+
+        let ours = platform_refusal(Some(&refused), false).unwrap();
+        assert!(matches!(ours, Error::PlatformMisconfigured { .. }));
+        assert_eq!(
+            TokenError::from_exchange(ours).status,
+            StatusCode::BAD_GATEWAY,
+            "a rejected client secret is not, and must not tell a user to retry"
+        );
+
+        // And nothing this service writes about it quotes the platform.
+        let Some(Error::PlatformMisconfigured { detail, .. }) =
+            platform_refusal(Some(&refused), false)
+        else {
+            panic!("a deployment fault")
+        };
+        assert!(!detail.contains("bad_verification_code"), "{detail}");
+    }
+
+    /// Which of the two it is comes off the received transcript, and the only
+    /// thing that survives that reading is one bit.
+    #[test]
+    fn the_bad_code_marker_is_read_from_the_response_the_session_saw() {
+        let names = |body: &[u8]| body.windows(BAD_CODE.len()).any(|w| w == BAD_CODE);
+        assert!(names(
+            b"HTTP/1.1 200 OK\r\n\r\n{\"error\":\"bad_verification_code\"}"
+        ));
+        for other in [
+            b"HTTP/1.1 200 OK\r\n\r\n{\"error\":\"incorrect_client_credentials\"}"
+                .as_slice(),
+            b"HTTP/1.1 200 OK\r\n\r\n{\"error\":\"redirect_uri_mismatch\"}".as_slice(),
+            b"HTTP/1.1 500 Internal Server Error\r\n\r\n{}".as_slice(),
+        ] {
+            assert!(!names(other), "{}", String::from_utf8_lossy(other));
+        }
     }
 
     /// Everything else is this service, the notary or the network. A request
@@ -910,7 +993,12 @@ mod tests {
             Some(&ceremony::LayoutError::NoHeadBoundary),
             None,
         ] {
-            assert!(platform_refusal(other).is_none(), "{other:?}");
+            for names_bad_code in [true, false] {
+                assert!(
+                    platform_refusal(other, names_bad_code).is_none(),
+                    "{other:?}"
+                );
+            }
         }
         assert_eq!(
             TokenError::from_exchange(Error::MpcTlsFailed {
@@ -1082,7 +1170,7 @@ mod tests {
             "got {refusal:?}"
         );
         // And that is the one refusal the caller is told to act on.
-        let told = platform_refusal(Some(&refusal)).expect("a platform refusal");
+        let told = platform_refusal(Some(&refusal), true).expect("a platform refusal");
         assert!(matches!(told, Error::OAuthFailed { .. }));
         assert_eq!(
             TokenError::from_exchange(told).status,
@@ -1107,11 +1195,11 @@ mod tests {
         let Err(refusal) = select_layouts(&sent, recv) else {
             panic!("a response with no bearer must not produce a selection")
         };
-        let told = platform_refusal(Some(&refusal)).expect("a platform refusal");
+        let told = platform_refusal(Some(&refusal), true).expect("a platform refusal");
         assert_eq!(
             TokenError::from_exchange(told).status,
             StatusCode::BAD_REQUEST,
-            "no access_token is a spent or forged code, which the caller can act on"
+            "no access_token plus a bad-code marker is the caller's to act on"
         );
 
         // And nothing else is. A layout that would not form for any other
@@ -1122,11 +1210,11 @@ mod tests {
             ceremony::LayoutError::MissingHeader("host"),
         ] {
             assert!(
-                platform_refusal(Some(&other)).is_none(),
+                platform_refusal(Some(&other), true).is_none(),
                 "{other} is not the caller's to fix"
             );
         }
-        assert!(platform_refusal(None).is_none());
+        assert!(platform_refusal(None, true).is_none());
         assert_eq!(
             TokenError::upstream("anything at all").status,
             StatusCode::BAD_GATEWAY

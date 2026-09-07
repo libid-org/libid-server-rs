@@ -350,7 +350,10 @@ mod tests {
         for needle in [
             "\"https://ccdp.example\"",
             "[\"https://app.example\"]",
-            "[1]",
+            // The whole assignment. `[1]` alone also matches
+            // `Number(match[1])` in the bootstrap, so it held whatever the
+            // version list became.
+            "const supportedCCDPVersions = Object.freeze([1]);",
         ] {
             assert!(shell.body.contains(needle), "{needle} missing");
         }

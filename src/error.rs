@@ -25,6 +25,22 @@ pub enum Error {
         detail: String,
     },
 
+    /// The platform refused the exchange for a reason the caller cannot fix.
+    ///
+    /// Told apart from [`Self::OAuthFailed`] because the two are opposite
+    /// operational facts: one is a user double-clicking a stale link, the
+    /// other is this deployment being broken for everybody until somebody
+    /// changes a setting. Answering both as the first hides the second behind
+    /// a stream of ordinary-looking refusals.
+    #[error("{platform} refused this deployment's own credentials: {detail}")]
+    PlatformMisconfigured {
+        /// The platform that refused.
+        platform: String,
+        /// Human-readable failure detail. Never the platform's own words --
+        /// this service writes it, so it cannot carry a platform return.
+        detail: String,
+    },
+
     /// Connecting to the notary failed.
     #[error("failed to connect to notary at {addr}: {detail}")]
     NotaryConnect {

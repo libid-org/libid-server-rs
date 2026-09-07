@@ -97,16 +97,27 @@ pub struct Config {
     /// above enable `github`, and refused when they do not: it is the one
     /// value that must never reach the public configuration, so it has no
     /// business being set for a platform nobody can select.
-    #[arg(long, env = "GH_OAUTH_CLIENT_SECRET", default_value = "")]
+    ///
+    /// `hide_env_values` because clap prints an argument's environment value
+    /// into its own help text. The image's entrypoint is this binary, so
+    /// `docker run <image> --help` with the env file attached wrote the secret
+    /// to stdout.
+    #[arg(
+        long,
+        env = "GH_OAUTH_CLIENT_SECRET",
+        hide_env_values = true,
+        default_value = ""
+    )]
     pub gh_oauth_client_secret: String,
 }
 
 /// Written by hand, and without the secret.
 ///
-/// `Debug` is the one thing that can take a client secret out of this process:
-/// a `dbg!`, a `tracing::debug!(?cfg)`, or a panic formatting the struct would
-/// put it in the log stream. `OAuthCredentials` derives only `Clone` for the
-/// same reason.
+/// `Debug` is one of the two ways a client secret can leave this process by
+/// accident: a `dbg!`, a `tracing::debug!(?cfg)`, or a panic formatting the
+/// struct would put it in the log stream. `OAuthCredentials` derives only
+/// `Clone` for the same reason. The other is clap's own help text, which is
+/// why the argument above sets `hide_env_values`.
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")

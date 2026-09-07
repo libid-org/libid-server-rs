@@ -63,9 +63,21 @@ if (oversized) {
     //    load is terminal for this document -- the browser caches the failed
     //    module-map entry, so a fresh document is the only retry.
     const moduleUrl = new URL(`/ccdp/v${version}/callback.js`, ccdpOrigin).href;
-    import(moduleUrl).then(
-      (callback) => callback.startCallback(locationInput, ...inputs),
-      fail,
-    );
+    // The rejection handler covers the import. A module that RESOLVES without
+    // a usable entrypoint would throw inside the fulfilled handler instead --
+    // an unhandled rejection, no fixed text, a blank popup. So the export is
+    // checked before it is called, and the call itself is guarded: the
+    // contract says any failure renders only fixed text after clearing.
+    import(moduleUrl).then((callback) => {
+      if (typeof callback.startCallback !== 'function') {
+        fail();
+        return;
+      }
+      try {
+        callback.startCallback(locationInput, ...inputs);
+      } catch {
+        fail();
+      }
+    }, fail);
   }
 }

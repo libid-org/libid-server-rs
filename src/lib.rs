@@ -324,9 +324,18 @@ fn callback_path(path: &str) -> Result<String> {
              the shell could not clear the return out of its own URL",
         ));
     }
-    if path.contains(['{', '}']) {
+    // Three spellings of the same mistake, and axum rejects all three at
+    // `Router::route` -- with a panic naming neither the setting nor the path.
+    // Braces are its current syntax; a segment opening with `:` or `*` is the
+    // syntax it carried before, still refused rather than routed.
+    if path.contains(['{', '}'])
+        || path
+            .split('/')
+            .any(|seg| seg.starts_with(':') || seg.starts_with('*'))
+    {
         return Err(refuse(
-            "contains a brace, which axum reads as a path pattern",
+            "contains a brace, or a segment beginning with `:` or `*`, which \
+             axum reads as a path pattern",
         ));
     }
     if path.contains(['?', '#'])
@@ -534,8 +543,19 @@ mod tests {
                 vec!["--callback-path", "auth/callback"],
             ),
             (
-                "a callback path axum reads as a pattern",
+                "a callback path axum reads as a brace pattern",
                 vec!["--callback-path", "/auth/{rest}"],
+            ),
+            // axum panics on both of these at `Router::route`, after
+            // `build_state` has already returned -- so the deployment learns
+            // by not starting, with nothing saying which setting did it.
+            (
+                "a callback path with a colon segment",
+                vec!["--callback-path", "/auth/:cb"],
+            ),
+            (
+                "a callback path with a star segment",
+                vec!["--callback-path", "/auth/*rest"],
             ),
             (
                 "a callback path a browser would percent-encode",

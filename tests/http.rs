@@ -535,7 +535,15 @@ async fn github_token_refuses_a_query() {
 /// `application/*+json`, which is a wider door than the contract opens.
 #[tokio::test]
 async fn github_token_takes_exactly_one_media_type() {
-    for (media, ok) in [
+    // A body the media check passes and the NEXT check refuses, so an
+    // accepted media type is proved by a `400` from validation rather than by
+    // whatever an exchange would answer. With a valid body these arms took a
+    // permit and dialled `--notary-url`, which is the production default: on a
+    // machine running a notary there, `cargo test` opened a real MPC-TLS
+    // session to github.com carrying the fixture's client secret. They also
+    // asserted only "not 415", so any answer passed.
+    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
+    for (media, admitted) in [
         ("application/json", true),
         ("application/json; charset=utf-8", true),
         ("application/vnd.libid+json", false),
@@ -544,18 +552,15 @@ async fn github_token_takes_exactly_one_media_type() {
         let req = Request::post("/api/v1/ceremony/github-token")
             .header("content-type", media)
             .header("origin", ORIGIN)
-            .body(Body::from(valid_body()))
+            .body(Body::from(body))
             .unwrap();
         let resp = app(test_state()).oneshot(req).await.unwrap();
-        if ok {
-            assert_ne!(
-                resp.status(),
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "{media} is the media type the contract names"
-            );
+        let expected = if admitted {
+            StatusCode::BAD_REQUEST
         } else {
-            assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE, "{media}");
-        }
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        };
+        assert_eq!(resp.status(), expected, "{media}");
     }
 }
 
