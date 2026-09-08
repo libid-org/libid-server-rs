@@ -709,6 +709,56 @@ async fn github_token_takes_exactly_one_media_type() {
     }
 }
 
+/// `ccdpOrigin` and nothing else, checked on every request.
+///
+/// The caller here is the Prover on the distribution, not the application, so
+/// an origin admitted to read the configuration is refused: the two lists are
+/// not unioned. Two `Origin` headers is not a request a browser sends, and
+/// taking the first would let the caller choose which one is read.
+#[tokio::test]
+async fn github_token_admits_one_exact_ccdp_origin_and_nothing_else() {
+    // Admitted to `/config`, and that grants nothing here.
+    for origin in [APP_ORIGIN, "https://wallet.example", "null", "not a url"] {
+        let req = Request::post("/api/v1/ceremony/github-token")
+            .header("content-type", "application/json")
+            .header("origin", origin)
+            .body(Body::from(valid_body()))
+            .unwrap();
+        let resp = app(test_state()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{origin}");
+    }
+
+    // The right origin twice is still two origins.
+    let req = Request::post("/api/v1/ceremony/github-token")
+        .header("content-type", "application/json")
+        .header("origin", ORIGIN)
+        .header("origin", ORIGIN)
+        .body(Body::from(valid_body()))
+        .unwrap();
+    let resp = app(test_state()).oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a repeated Origin must not be admitted by reading the first"
+    );
+
+    // And the admitted origin with a body the next check refuses, so this
+    // proves admission without opening a notary session.
+    let req = Request::post("/api/v1/ceremony/github-token")
+        .header("content-type", "application/json")
+        .header("origin", ORIGIN)
+        .body(Body::from(
+            r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#,
+        ))
+        .unwrap();
+    let resp = app(test_state()).oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "admitted, then refused on the body"
+    );
+}
+
 /// The token route's CORS layer covers the token route and nothing else.
 ///
 /// `Router::layer` wraps a sub-router's fallback as well as its routes, and

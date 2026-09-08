@@ -304,11 +304,20 @@ pub(crate) async fn github_token(
     // caller authentication — a request with no browser behind it carries
     // whatever `Origin` it likes — it stops a page on another origin from
     // spending this bridge's secret through someone else's browser.
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    if origin != github.ccdp_origin {
+    //
+    // `ccdpOrigin` and nothing else. An application origin is admitted only if
+    // it is also exactly this one: the caller here is the Prover on the
+    // distribution, not the application, so `allowedAppOrigins` grants nothing.
+    //
+    // `get_all`, not `get`: the contract refuses a request carrying MULTIPLE
+    // `Origin` headers, and taking the first would let a caller pick which one
+    // is read. Missing, `null` and malformed all fall through the same way.
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let admitted = matches!(
+        (origins.next(), origins.next()),
+        (Some(origin), None) if origin.as_bytes() == github.ccdp_origin.as_bytes()
+    );
+    if !admitted {
         return Err(TokenError {
             status: StatusCode::FORBIDDEN,
             message: "this route is callable only from the configured CCDP origin".into(),
