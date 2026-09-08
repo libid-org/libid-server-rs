@@ -63,7 +63,12 @@ pub struct Config {
     /// that serves the Callback module the shell imports and everything the
     /// browser runs after it. Published in the configuration and embedded in
     /// the shell. It names no artifact, circuit or notary.
-    #[arg(long, env = "CCDP_ORIGIN")]
+    ///
+    /// Defaults to the canonical libID Distribution, which is what the
+    /// contract says an omitted value selects. It is a default and not a
+    /// fallback: a deployment that sets this gets exactly what it set, and one
+    /// that does not is pointed at `lib.id` rather than refused.
+    #[arg(long, env = "CCDP_ORIGIN", default_value = "https://lib.id")]
     pub ccdp_origin: String,
 
     /// The closed list of CCDP versions whose Callback the shell may import,

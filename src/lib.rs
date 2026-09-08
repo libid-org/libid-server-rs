@@ -427,6 +427,32 @@ mod tests {
         );
     }
 
+    /// An omitted CCDP origin selects the canonical libID Distribution, which
+    /// the contract names. Built without the flag at all rather than with it
+    /// set to that value, so the assertion is about the default and not about
+    /// a string typed twice.
+    #[test]
+    fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
+        let cfg = <config::Config as clap::Parser>::parse_from([
+            "libid-server-rs",
+            "--base-url",
+            "https://id.example",
+            "--allowed-app-origins",
+            "https://app.example",
+            "--ceremony-platforms",
+            r#"[{"id":"github","clientId":"Iv1.x","versions":[1]}]"#,
+            "--gh-oauth-client-secret",
+            "ghs_secret",
+        ]);
+        assert_eq!(cfg.ccdp_origin, "https://lib.id");
+
+        // And it reaches the record an application reads, not just the config.
+        let state = build_state(&cfg).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&state.ceremony_config).unwrap();
+        assert_eq!(record["ccdpOrigin"], "https://lib.id");
+    }
+
     /// The notary address is resolved once at startup rather than per
     /// ceremony, so a URL that names no host or no port stops the process
     /// instead of failing the first exchange that dials it.

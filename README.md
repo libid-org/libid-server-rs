@@ -165,7 +165,7 @@ All settings come from environment variables (or the matching `--flag`).
 | `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server, as a bare origin; HTTPS unless loopback. Every provider's registered callback URL must be exactly `{BASE_URL}{CALLBACK_PATH}`. |
 | `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins admitted to read the configuration. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. |
 | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
-| `CCDP_ORIGIN` | *(required)* | The CCDP Distribution this bridge selects: one origin serving `/ccdp/v{N}/callback.js` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and embedded in the shell. |
+| `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/v{N}/callback.js` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and embedded in the shell. Omitting it selects the canonical libID Distribution. |
 | `CCDP_SUPPORTED_VERSIONS` | `1` | The closed list of CCDP versions the shell may import. |
 | `CALLBACK_STYLE_HASH` | *(empty)* | The package-published CSP hash of the Callback stylesheet, `sha256-…`. Empty means `style-src 'none'`. |
 | `CEREMONY_PLATFORMS` | *(required)* | The enabled platforms as JSON — see below. |
