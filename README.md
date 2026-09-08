@@ -56,7 +56,7 @@ out; origin checks and a closed input surface cannot constrain its owner.
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
 | `GET` | `/api/v1/ceremony/config` | The public ceremony configuration. Readable only from an admitted application origin. |
-| `GET` | `{CALLBACK_PATH}` (default `/auth/callback`) | The registered OAuth callback shell: one document, identical for every request, that clears the provider's return and imports the Callback module from the CCDP Distribution. |
+| `GET` | `{CALLBACK_PATH}` (default `/auth/callback`) | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
 | `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin, whose preflight it answers. `403` for any other origin, `400` for a query, `415` for any media type but exactly `application/json`, in that order. |
 
 The contract's route surface is closed — "the bridge exposes only" the last
@@ -120,22 +120,42 @@ path, a `schema` member, a single-string attestation — this server follows
 OAUTH_BRIDGE.md, by decision.
 
 This server is the **OAuth Bridge**, and only that. Everything the browser
-executes — the Callback module its shell imports, Airlock, the prover, the
-circuits and notarization client — is served by a separate static **CCDP
-Distribution** at `CCDP_ORIGIN`, which may be cross-site and knows nothing about
-this bridge. The bridge publishes configuration, serves one callback shell, and
-performs GitHub's exchange. It serves no CCDP resource and no proving asset.
+executes — the Callback implementation, the prover, the circuits and
+notarization client — is served by a separate static **CCDP Distribution** at
+`CCDP_ORIGIN`, which may be cross-site and knows nothing about this bridge. The
+bridge publishes configuration, serves one callback document, and performs
+GitHub's exchange. It serves no CCDP resource and no proving asset.
 
-The callback shell is rendered once at startup and never varies: no request
-field — `Origin`, `Referer`, query, fragment — changes a byte of it or its
-policy. Its inline bootstrap bounds and copies the provider's return, clears it
-with `history.replaceState`, reads the CCDP version from the OAuth `state`,
-checks it against the closed supported list, and imports
-`{CCDP_ORIGIN}/ccdp/v{N}/callback.js`. The server never sees the return: the
-handler reads nothing from the request, and there is no request-logging
-middleware. **Any proxy in front of this server must redact the callback path's
-query string from its access logs** — that half of the contract is the
-operator's.
+### The callback document
+
+The bridge does not write it. The Distribution builds one self-contained
+artifact at `/ccdp/callback.html` carrying every supported Callback
+implementation, with one non-executable slot for deployment data. The bridge
+reads that artifact, substitutes **one unversioned list** —
+`[allowedAppOrigins, ccdpOrigin]`, both already validated for other reasons —
+into the slot, computes the response policy from the bytes it is about to
+serve, and publishes the pair. It parses no OAuth `state`, selects no CCDP
+version, and holds no version list: a compatible Callback change needs no
+bridge rebuild.
+
+The policy's `script-src` carries **only hashes, computed here over the served
+bytes** — never copied from an upstream header, because a policy taken on trust
+from the document it constrains is not a constraint. The artifact bundles its
+dependencies, so no external script source appears at all.
+
+The document is composed once at startup and never varies: no request field —
+`Origin`, `Referer`, query, fragment — changes a byte of it or its policy. The
+server never sees the provider's return: the handler reads nothing from the
+request, and there is no request-logging middleware. **Any proxy in front of
+this server must redact the callback path's query string from its access
+logs** — that half of the contract is the operator's.
+
+Today the artifact is **compiled into the binary** (`src/artifact/callback.html`)
+rather than fetched. That floor is deliberately not a working Callback: it
+clears the OAuth return, renders fixed text and completes no ceremony, and the
+process says so loudly at startup. It exists so the bridge always has a valid
+document to serve — the contract's "inert unavailable response" has no
+representation here. **Vendor a real artifact before running a deployment.**
 
 ## What the operator has to supply
 
@@ -165,9 +185,7 @@ All settings come from environment variables (or the matching `--flag`).
 | `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server, as a bare origin; HTTPS unless loopback. Every provider's registered callback URL must be exactly `{BASE_URL}{CALLBACK_PATH}`. |
 | `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins admitted to read the configuration. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. |
 | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
-| `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/v{N}/callback.js` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and embedded in the shell. Omitting it selects the canonical libID Distribution. |
-| `CCDP_SUPPORTED_VERSIONS` | `1` | The closed list of CCDP versions the shell may import. |
-| `CALLBACK_STYLE_HASH` | *(empty)* | The package-published CSP hash of the Callback stylesheet, `sha256-…`. Empty means `style-src 'none'`. |
+| `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `CEREMONY_PLATFORMS` | *(required)* | The enabled platforms as JSON — see below. |
 | `NOTARY_URL` | `tcp://127.0.0.1:7047` | The notary server's TCP endpoint. |
 | `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret. Required exactly when `CEREMONY_PLATFORMS` enables `github`, and refused otherwise. |

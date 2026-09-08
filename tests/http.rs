@@ -1,5 +1,5 @@
 //! HTTP-level tests over the axum router: the public configuration, the
-//! callback shell's invariance and policy, and the token route's origin gate.
+//! callback document's invariance and policy, and the token route's origin gate.
 
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ const REDIRECT_URI: &str = "http://127.0.0.1:8722/auth/callback";
 /// Through `build_state` and not a struct literal, so every derivation this
 /// suite then makes assertions about -- the redirect URI joined from the
 /// origin and the callback path, the client id shared by the published record
-/// and the token request, the CCDP origin reaching the shell, the record and
+/// and the token request, the CCDP origin reaching the document, the record and
 /// the token route's own gate -- is the one production performs. A hand-built
 /// fixture asserts the literals the fixture typed.
 ///
@@ -490,7 +490,8 @@ async fn config_varies_on_both_admission_headers() {
 /// The record carries exactly what the contract lists and nothing else.
 ///
 /// `allowedAppOrigins` is absent because the contract says the record contains
-/// no such field -- not because the list is secret: the callback shell embeds
+/// no such field -- not because the list is secret: the callback document
+/// carries
 /// it in a document served to anyone, and the Callback module needs it there.
 /// The secret is the field that genuinely must never appear.
 #[tokio::test]
@@ -553,9 +554,9 @@ async fn the_token_route_is_absent_when_github_is_not_enabled() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-// ─── the callback shell ──────────────────────────────────────────────────────
+// ─── the callback document ───────────────────────────────────────────────────
 
-async fn get_shell(path: &str, headers: &[(&str, &str)]) -> axum::response::Response {
+async fn get_callback(path: &str, headers: &[(&str, &str)]) -> axum::response::Response {
     let mut req = Request::get(path);
     for (k, v) in headers {
         req = req.header(*k, *v);
@@ -566,11 +567,11 @@ async fn get_shell(path: &str, headers: &[(&str, &str)]) -> axum::response::Resp
         .unwrap()
 }
 
-/// The provider brings the return in the query; the shell must not care, and
+/// The provider brings the return in the query; the document must not vary, and
 /// no `Origin` or `Referer` may change a byte of it. One document, whatever
 /// arrives.
 #[tokio::test]
-async fn the_callback_shell_is_the_same_bytes_whatever_the_request() {
+async fn the_callback_document_is_the_same_bytes_whatever_the_request() {
     /// Status, sorted headers, body -- everything a response is.
     type Observed = (StatusCode, Vec<(String, String)>, bytes::Bytes);
     let mut seen: Vec<Observed> = Vec::new();
@@ -586,10 +587,11 @@ async fn the_callback_shell_is_the_same_bytes_whatever_the_request() {
         // Kept for the shape, not the coverage: a fragment never reaches the
         // wire, so `Uri` drops it and this is the bare path again. What clears
         // the fragment is the bootstrap, covered by
-        // `shell::tests::the_bootstrap_clears_the_return_before_it_decides_anything`.
+        // the artifact's own bundled code, which this bridge neither writes
+        // nor inspects.
         ("/auth/callback#id_token=x&state=v1.9e1f", vec![]),
     ] {
-        let resp = get_shell(path, &headers).await;
+        let resp = get_callback(path, &headers).await;
         let status = resp.status();
         let mut hs: Vec<(String, String)> = resp
             .headers()
@@ -609,8 +611,8 @@ async fn the_callback_shell_is_the_same_bytes_whatever_the_request() {
 /// The exact policy the contract lists, and the one that must not be got
 /// wrong: NOT isolated, so the application opener survives the provider.
 #[tokio::test]
-async fn the_callback_shell_carries_the_exact_response_policy() {
-    let resp = get_shell("/auth/callback", &[]).await;
+async fn the_callback_document_carries_the_exact_response_policy() {
+    let resp = get_callback("/auth/callback", &[]).await;
     let h = resp.headers();
     assert_eq!(h.get("cross-origin-opener-policy").unwrap(), "unsafe-none");
     assert!(h.get("cross-origin-embedder-policy").is_none());
@@ -618,30 +620,76 @@ async fn the_callback_shell_carries_the_exact_response_policy() {
     assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
     assert_eq!(h.get("cache-control").unwrap(), "no-store");
     assert_eq!(h.get("referrer-policy").unwrap(), "no-referrer");
+
     let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
-    for directive in [
-        "default-src 'none'",
-        "object-src 'none'",
-        "base-uri 'none'",
-        "form-action 'none'",
-        "frame-ancestors 'none'",
-        "frame-src https://ccdp.example",
-        "connect-src 'none'",
-        "'sha256-",
-        "https://ccdp.example/ccdp/v1/callback.js",
+    let directive = |name: &str| -> String {
+        csp.split(';')
+            .map(str::trim)
+            .find(|d| d.split(' ').next() == Some(name))
+            .unwrap_or_else(|| panic!("{name} missing from {csp}"))
+            .to_owned()
+    };
+    for name in [
+        "default-src",
+        "object-src",
+        "base-uri",
+        "form-action",
+        "frame-ancestors",
     ] {
-        assert!(csp.contains(directive), "{directive} missing from {csp}");
+        assert_eq!(directive(name), format!("{name} 'none'"));
     }
+    assert_eq!(directive("frame-src"), format!("frame-src {CCDP_ORIGIN}"));
+    assert_eq!(directive("connect-src"), "connect-src 'none'");
+    // The package owns its styles now; there is no stylesheet hash to
+    // configure and no external stylesheet source to admit.
+    assert_eq!(directive("style-src"), "style-src 'unsafe-inline'");
+
+    // DIRECTIVE-SCOPED, not a substring search over the whole policy.
+    // `'unsafe-inline'` is legitimate above, so a test that forbade the token
+    // everywhere would either fail here or get "fixed" by deleting the very
+    // token it exists to catch in `script-src`.
+    let script_src = directive("script-src");
+    let tokens: Vec<&str> = script_src.split(' ').skip(1).collect();
+    assert!(!tokens.is_empty(), "no hash in {script_src}");
+    for token in &tokens {
+        assert!(
+            token.starts_with("'sha256-") && token.ends_with('\''),
+            "{token} in {script_src} is not a hash"
+        );
+    }
+    // No external script source at all: the artifact bundles its dependencies,
+    // so the CCDP module URL a generated shell would have imported is gone.
+    assert!(
+        !script_src.contains(CCDP_ORIGIN),
+        "an external script source survived in {script_src}"
+    );
+
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("<main id=\"libid-root\"></main>"));
-    assert_eq!(html.matches("<script").count(), 1);
     assert!(!html.contains("test-client-secret"));
+
+    // One module script, and one hash naming it. That the hash is the RIGHT
+    // one is asserted where `hash_source` lives, in `artifact::tests` -- it
+    // cannot drift there, and this suite has no reason to own a copy of the
+    // digest code.
+    assert_eq!(html.matches("<script type=\"module\">").count(), 1);
+    assert_eq!(tokens.len(), 1, "one script, one hash: {script_src}");
+
+    // The deployment data reached the slot, and the marker did not survive.
+    assert!(
+        html.contains(APP_ORIGIN),
+        "the admitted origins are inserted"
+    );
+    assert!(
+        !html.contains("__LIBID_CALLBACK_CONFIG__"),
+        "marker substituted"
+    );
 }
 
-/// The shell is a navigation target, and only that.
+/// The callback document is a navigation target, and only that.
 #[tokio::test]
-async fn the_callback_shell_admits_only_get() {
+async fn the_callback_document_admits_only_get() {
     let req = Request::post("/auth/callback").body(Body::empty()).unwrap();
     let resp = app(test_state()).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
@@ -657,7 +705,7 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
         "/auth/v1/callback",
         "/api/v1/ceremony/callback",
     ] {
-        let resp = get_shell(path, &[]).await;
+        let resp = get_callback(path, &[]).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
     }
 }

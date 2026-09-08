@@ -7,20 +7,23 @@
 //! GitHub's, which needs a client secret. `/health` is the fourth, outside the
 //! contract's closed surface and kept for the container healthcheck.
 //!
-//! Everything the browser executes after that callback -- the Callback module
-//! it imports, Airlock, the prover, its circuits and notarization client -- is
-//! served by a separate CCDP Distribution at a configured origin. This service
-//! verifies no proof, holds no key of its own, keeps no ceremony state, and
-//! talks to no chain.
+//! It does not WRITE that callback document. The CCDP Distribution builds one
+//! self-contained artifact carrying every supported Callback implementation,
+//! and this service inserts its deployment data into the one slot the artifact
+//! leaves and serves the result -- so browser code, version selection and
+//! failure UI belong to the distribution, and a compatible Callback change
+//! needs no bridge rebuild. Everything the browser executes after the callback
+//! is served from that distribution too. This service verifies no proof, holds
+//! no key of its own, keeps no ceremony state, and talks to no chain.
 
 #![warn(missing_docs)]
 
+pub(crate) mod artifact;
 pub mod config;
 pub(crate) mod deployment;
 pub mod error;
 pub(crate) mod oauth;
 pub mod routes;
-pub(crate) mod shell;
 pub mod state;
 
 use std::sync::Arc;
@@ -59,8 +62,6 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
-    let ccdp_versions = ccdp_versions(&cfg.ccdp_supported_versions)?;
-    let style_hash = style_hash(&cfg.callback_style_hash)?;
     let platforms = deployment::platforms(&cfg.ceremony_platforms)?;
     // A constant that either always parses or never does, parsed here so a
     // build in which it does not fails at startup rather than on the first
@@ -109,12 +110,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             &ccdp_origin,
             &platforms,
         ),
-        callback_shell: shell::callback(&shell::ShellInputs {
-            ccdp_origin: &ccdp_origin,
-            supported_versions: &ccdp_versions,
-            allowed_app_origins: &allowed_app_origins,
-            style_hash,
-        })?,
+        callback: callback_document(&ccdp_origin, &allowed_app_origins)?,
         admits_same_origin_config: allowed_app_origins
             .iter()
             .any(|o| o == &server_origin),
@@ -124,60 +120,40 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     }))
 }
 
-/// The package-published CSP hash of the shell's stylesheet.
+/// Configure the callback document this deployment serves.
 ///
-/// Spliced into a `Content-Security-Policy`, where `;` starts a new directive
-/// and the FIRST occurrence of a directive wins. An unchecked value carrying
-/// one does not merely break the policy -- it prepends its own `connect-src`
-/// and `frame-src` ahead of the intended ones, which are then ignored, and the
-/// shell can send the OAuth return anywhere. So the shape is exact: a hash
-/// algorithm the CSP grammar names, and base64 after it.
-fn style_hash(hash: &str) -> Result<&str> {
-    if hash.is_empty() {
-        return Ok(hash);
+/// The compiled-in artifact, which is a floor and not a working Callback: a
+/// deployment running on it answers the registered redirect URI with a document
+/// that clears the credential and stops. It is loud about that, because the
+/// alternative is a deployment that looks healthy and completes no ceremony.
+///
+/// It is composed at startup rather than fetched, so the process binds without
+/// reaching the network and no request can arrive at a route with nothing to
+/// answer -- which is why the contract's "inert unavailable response" has no
+/// representation here.
+fn callback_document(
+    ccdp_origin: &str,
+    allowed_app_origins: &[String],
+) -> Result<artifact::CallbackDocument> {
+    let document = artifact::compose(
+        artifact::EMBEDDED,
+        &artifact::DeploymentInputs {
+            ccdp_origin,
+            allowed_app_origins,
+        },
+        artifact::Source::Embedded,
+    )
+    .map_err(|e| Error::Config {
+        detail: format!("the compiled-in callback artifact is not serveable: {e}"),
+    })?;
+    if document.source == artifact::Source::Embedded {
+        tracing::warn!(
+            "serving the COMPILED-IN callback artifact: it clears the OAuth return \
+             and renders fixed text, and completes no ceremony. Vendor a real \
+             artifact from the CCDP Distribution before running this deployment."
+        );
     }
-    let refuse = || Error::Config {
-        detail: format!(
-            "CALLBACK_STYLE_HASH {hash} is not a CSP hash source; it must be \
-             sha256-, sha384- or sha512- followed by base64"
-        ),
-    };
-    let b64 = ["sha256-", "sha384-", "sha512-"]
-        .iter()
-        .find_map(|p| hash.strip_prefix(p))
-        .ok_or_else(refuse)?;
-    if b64.is_empty()
-        || !b64
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
-    {
-        return Err(refuse());
-    }
-    Ok(hash)
-}
-
-/// The closed list of CCDP versions the shell may select.
-fn ccdp_versions(list: &str) -> Result<Vec<u16>> {
-    let mut out = Vec::new();
-    for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let v: u16 = item.parse().map_err(|_| Error::Config {
-            detail: format!("CCDP_SUPPORTED_VERSIONS: {item:?} is not a CCDP version"),
-        })?;
-        if out.contains(&v) {
-            return Err(Error::Config {
-                detail: format!("CCDP_SUPPORTED_VERSIONS names {v} more than once"),
-            });
-        }
-        out.push(v);
-    }
-    if out.is_empty() {
-        return Err(Error::Config {
-            detail: "CCDP_SUPPORTED_VERSIONS is empty, so the shell could import \
-                     no Callback at all"
-                .into(),
-        });
-    }
-    Ok(out)
+    Ok(document)
 }
 
 /// The application origins admitted to read the configuration.
@@ -278,9 +254,9 @@ fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     // Content-Security-Policy reads as syntax: `;` there starts a new
     // directive, and CSP honours the FIRST occurrence of each. The CCDP origin
     // is spliced unescaped into `script-src` and `frame-src`, so
-    // `https://a;b.example` silently truncates the module source and the shell
-    // imports nothing. Closed to what an origin is actually made of, which is
-    // the same shape `CALLBACK_STYLE_HASH` is held to and for the same reason.
+    // `https://a;b.example` silently truncates `frame-src` and the document
+    // can frame nothing. Closed to what an origin is actually made of, because
+    // a policy is not a place to discover that a setting had syntax in it.
     let origin = url.origin().ascii_serialization();
     if !origin
         .bytes()
@@ -324,7 +300,7 @@ fn callback_path(path: &str) -> Result<String> {
     if path.starts_with("//") {
         return Err(refuse(
             "begins with `//`, which a browser reads as scheme-relative, so \
-             the shell could not clear the return out of its own URL",
+             the document could not clear the return out of its own URL",
         ));
     }
     // Three spellings of the same mistake, and axum rejects all three at
@@ -558,15 +534,6 @@ mod tests {
                 "a plaintext admitted origin that is not loopback",
                 vec!["--allowed-app-origins", "http://app.example"],
             ),
-            ("no CCDP version", vec!["--ccdp-supported-versions", ""]),
-            (
-                "a duplicate CCDP version",
-                vec!["--ccdp-supported-versions", "1,1"],
-            ),
-            (
-                "a CCDP version that is not one",
-                vec!["--ccdp-supported-versions", "one"],
-            ),
             (
                 "a relative callback path",
                 vec!["--callback-path", "auth/callback"],
@@ -601,22 +568,6 @@ mod tests {
             (
                 "a scheme-relative callback path",
                 vec!["--callback-path", "//evil.example/cb"],
-            ),
-            (
-                "a stylesheet hash of no named algorithm",
-                vec!["--callback-style-hash", "abc123"],
-            ),
-            // Two ways to forge a CSP directive out of this one setting, and
-            // two different guards catch them: no named algorithm at all, and
-            // a named algorithm followed by bytes that are not base64. The
-            // second is the one a `sha256-` prefix would otherwise wave past.
-            (
-                "a stylesheet hash whose prefix is right and whose body is not base64",
-                vec!["--callback-style-hash", "sha256-abc'; connect-src *"],
-            ),
-            (
-                "a stylesheet hash of a named algorithm and nothing else",
-                vec!["--callback-style-hash", "sha256-"],
             ),
             // `Url` keeps these in a host; a Content-Security-Policy reads the
             // first as a directive separator. Every configured origin is held

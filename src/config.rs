@@ -35,7 +35,7 @@ pub struct Config {
     /// `redirect_uri` is built on and a browser sends none of them.
     ///
     /// HTTPS, unless the host is loopback: the bridge origin is a code-supply
-    /// boundary for the callback shell, and a plaintext one is no boundary.
+    /// boundary for the callback document, and a plaintext one is no boundary.
     ///
     /// The registered OAuth callback URL is derived as
     /// `{BASE_URL}{CALLBACK_PATH}` and must match every provider's
@@ -60,9 +60,10 @@ pub struct Config {
     pub callback_path: String,
 
     /// The CCDP Distribution this bridge selects: one canonical HTTPS origin
-    /// that serves the Callback module the shell imports and everything the
-    /// browser runs after it. Published in the configuration and embedded in
-    /// the shell. It names no artifact, circuit or notary.
+    /// that serves the Callback artifact this bridge configures and everything
+    /// the browser runs after it. Published in the configuration and inserted
+    /// into the document. The artifact path is fixed, so no artifact URL, and
+    /// no circuit or notary, is configured.
     ///
     /// Defaults to the canonical libID Distribution, which is what the
     /// contract says an omitted value selects. It is a default and not a
@@ -70,18 +71,6 @@ pub struct Config {
     /// that does not is pointed at `lib.id` rather than refused.
     #[arg(long, env = "CCDP_ORIGIN", default_value = "https://lib.id")]
     pub ccdp_origin: String,
-
-    /// The closed list of CCDP versions whose Callback the shell may import,
-    /// comma-separated. A version the distribution does not serve is a
-    /// ceremony that fails after clearing its return.
-    #[arg(long, env = "CCDP_SUPPORTED_VERSIONS", default_value = "1")]
-    pub ccdp_supported_versions: String,
-
-    /// The package-published CSP hash of the Callback stylesheet, as
-    /// `sha256-…`. Empty means `style-src 'none'`: a shell whose stylesheet
-    /// cannot be named renders unstyled rather than admit any stylesheet.
-    #[arg(long, env = "CALLBACK_STYLE_HASH", default_value = "")]
-    pub callback_style_hash: String,
 
     /// The enabled platforms, as JSON. One record per platform, each with its
     /// public client id and its advertised ceremony versions:
@@ -133,8 +122,6 @@ impl std::fmt::Debug for Config {
             .field("allowed_app_origins", &self.allowed_app_origins)
             .field("callback_path", &self.callback_path)
             .field("ccdp_origin", &self.ccdp_origin)
-            .field("ccdp_supported_versions", &self.ccdp_supported_versions)
-            .field("callback_style_hash", &self.callback_style_hash)
             .field("ceremony_platforms", &self.ceremony_platforms)
             .field("gh_oauth_client_secret", &"<redacted>")
             .finish()

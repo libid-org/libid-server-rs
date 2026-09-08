@@ -63,10 +63,16 @@ pub struct GithubExchange {
 /// Configuration every route reads.
 pub struct AppState {
     /// The configured path the providers redirect back to, where the callback
-    /// shell answers.
+    /// callback document answers.
     pub(crate) callback_path: String,
-    /// The callback document, rendered once with its finished policy.
-    pub(crate) callback_shell: crate::shell::RenderedShell,
+    /// The callback document and the policy it is served under, composed once
+    /// at startup from the configured artifact.
+    ///
+    /// Held by value rather than behind a shared cell because nothing replaces
+    /// it yet. When the bridge grows a refresh loop this becomes a
+    /// `watch::Receiver`, and the handler's `.clone()` of two cheap fields
+    /// becomes a `borrow().clone()` -- the route does not otherwise change.
+    pub(crate) callback: crate::artifact::CallbackDocument,
     /// Whether this bridge's own origin is one of the admitted application
     /// origins.
     ///

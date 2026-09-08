@@ -139,7 +139,7 @@ pub fn platforms(json: &str) -> Result<Vec<PlatformProfile>> {
 /// travel; nothing about artifacts does, because an application selects a
 /// platform and a version and never an artifact. The CCDP origin travels too:
 /// it is where the application sends the popup, and the one origin whose
-/// Callback this bridge's shell will import.
+/// Callback artifact this bridge serves.
 fn record(redirect_uri: &str, ccdp_origin: &str, platforms: &[PlatformProfile]) -> Value {
     let mut by_id = Map::new();
     for p in platforms {

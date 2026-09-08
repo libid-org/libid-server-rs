@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>libID</title><body><main id="libid-root"></main><script id="libid-callback-config" type="application/json">__LIBID_CALLBACK_CONFIG__</script><script type="module">
+// The floor. NOT a working Callback -- it completes no ceremony, and a
+// deployment serving it answers the registered redirect URI with a document
+// that clears the credential and then stops.
+//
+// It exists so the bridge always has a valid document to serve: the artifact
+// contract's "inert unavailable response" has no representation in this
+// service, because a route that can answer nothing is a state a reader has to
+// account for and a deployment has to discover. Replace this file with a
+// vetted snapshot of {ccdpOrigin}/ccdp/callback.html and nothing else changes.
+//
+// What it does do is the one thing that must happen before anything else,
+// whoever wrote the document: copy the provider's return and clear it out of
+// this document's URL. A floor that skipped that would leave an authorization
+// code in the address bar and in history for every ceremony it caught.
+const query = location.search;
+const fragment = location.hash;
+history.replaceState(null, '', location.pathname);
+
+// Nothing below reads either. They are copied only so the clearing above is
+// the same step the real implementation performs, in the same order, rather
+// than a bare URL wipe that happens to look similar.
+void query;
+void fragment;
+
+const mount = document.getElementById('libid-root');
+if (mount) {
+  mount.textContent =
+    'This deployment is not serving a ceremony callback yet. Nothing was sent.';
+}
+</script></body></html>

@@ -8,7 +8,7 @@
 //! Everything the browser runs — the Callback module, Airlock, the prover, its
 //! circuits and notarization client — is served by the CCDP Distribution at
 //! the configured `ccdpOrigin`, not here. This service publishes
-//! configuration, serves one callback shell, and performs the one exchange a
+//! configuration, serves one callback document, and performs the one exchange a
 //! browser cannot: GitHub's, which needs a client secret.
 //!
 //! CORS is answered in two places and nowhere else. The configuration route

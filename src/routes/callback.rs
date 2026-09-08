@@ -4,8 +4,8 @@
 //! This handler reads nothing from the request. No `Uri`, no query, no
 //! `Origin`, no `Referer` — the provider's return arrives in the query, and the
 //! strongest way to keep it out of every log and error this service could ever
-//! produce is for no code here to be able to see it. The browser-side
-//! bootstrap copies and clears it; the server never learns it existed.
+//! produce is for no code here to be able to see it. The artifact's own
+//! bundled code copies and clears it; the server never learns it existed.
 
 use std::sync::Arc;
 
@@ -43,11 +43,8 @@ pub(crate) async fn callback(State(state): State<Arc<AppState>>) -> Response {
         // Set once at startup; serving it is a reference-count bump, not a
         // parse. It rides separately because it is already a header value
         // while the rest are static strings.
-        [(
-            header::CONTENT_SECURITY_POLICY,
-            state.callback_shell.csp.clone(),
-        )],
-        state.callback_shell.body.clone(),
+        [(header::CONTENT_SECURITY_POLICY, state.callback.csp.clone())],
+        state.callback.body.clone(),
     )
         .into_response()
 }

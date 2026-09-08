@@ -1,0 +1,431 @@
+//! Reading a Callback artifact well enough to serve it, and refusing anything
+//! else.
+//!
+//! This is a tag-level tokenizer, not an HTML parser: it builds no tree,
+//! resolves no entities and recovers from nothing. It exists to answer two
+//! questions -- where is the configuration slot, and which byte ranges will the
+//! browser execute -- and to refuse any document where it cannot answer both
+//! with certainty.
+//!
+//! A substring search for `<script` would be shorter and wrong. It cannot tell
+//! a tag from the same text inside an attribute value or a comment, and the
+//! cost of being wrong is not a missed element: it is a policy that names the
+//! hash of a different span than the browser runs, served `200`, with the
+//! document silently refusing to execute.
+//!
+//! The artifact is build-generated, so it can be held to a shape. Everything
+//! here refuses rather than interprets, and three of the rules are about hash
+//! correctness rather than tidiness -- they are marked where they appear.
+
+use std::ops::Range;
+
+/// The marker the build leaves for deployment data, and the element that
+/// carries it. Both are fixed by the artifact contract.
+pub(crate) const MARKER: &str = "__LIBID_CALLBACK_CONFIG__";
+const SLOT_OPEN: &str = "<script id=\"libid-callback-config\" type=\"application/json\">";
+const MODULE_OPEN: &str = "<script type=\"module\">";
+const SCRIPT_CLOSE: &str = "</script>";
+
+/// The largest artifact this bridge will read.
+///
+/// A bundled Callback plausibly runs a few hundred KiB. Sized against the token
+/// route's 3 MiB response bound so the two are recognisably the same order, and
+/// finite because an unbounded read from a remote origin is a memory budget
+/// someone else controls.
+pub(crate) const MAX_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most executable scripts a document may carry.
+///
+/// The contract's example has one. More is allowed because "hashes" is plural
+/// there, but an artifact with dozens is not the shape this was written for.
+const MAX_EXECUTABLES: usize = 8;
+
+/// Why an artifact was refused.
+///
+/// Every variant is a refusal to serve, never a repair. The bridge has one
+/// valid document already; a second that it does not fully understand is worth
+/// less than the one it has.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ArtifactError {
+    #[error("the artifact is {0} bytes, over the {MAX_ARTIFACT_BYTES}-byte bound")]
+    TooLarge(usize),
+    #[error("the artifact carries {0} at byte {1}, which this bridge will not read")]
+    Forbidden(&'static str, usize),
+    #[error("a tag at byte {0} is not in the canonical form this bridge reads")]
+    Malformed(usize),
+    #[error("a script at byte {0} is neither the config slot nor a plain module")]
+    UnreadableScript(usize),
+    #[error("the document carries {0} configuration slots, and must carry one")]
+    Markers(usize),
+    #[error("the configuration slot does not hold exactly the marker")]
+    Marker,
+    #[error("the document carries {0} executable scripts, and must carry 1 to 8")]
+    Executables(usize),
+    #[error("the document does not carry exactly one empty `<main id=\"libid-root\">`")]
+    MountPoint,
+    #[error("inserting the deployment data moved bytes the browser executes")]
+    SubstitutionMovedExecutableBytes,
+    #[error("the composed policy is not a header value: {0}")]
+    Policy(String),
+}
+
+/// Where the slot is and what the browser will execute.
+#[derive(Debug)]
+pub(crate) struct Layout {
+    /// The byte range of the marker itself, between the slot element's tags.
+    pub(crate) slot: Range<usize>,
+    /// The byte ranges the browser executes, in document order. Each is exactly
+    /// the text between a `<script type="module">` and its `</script>`, which
+    /// is the span a CSP hash covers.
+    pub(crate) executables: Vec<Range<usize>>,
+}
+
+/// Read an artifact, or refuse it.
+pub(crate) fn scan(html: &str) -> Result<Layout, ArtifactError> {
+    if html.len() > MAX_ARTIFACT_BYTES {
+        return Err(ArtifactError::TooLarge(html.len()));
+    }
+    refuse_hostile_bytes(html)?;
+
+    let bytes = html.as_bytes();
+    let mut slots: Vec<Range<usize>> = Vec::new();
+    let mut executables: Vec<Range<usize>> = Vec::new();
+    let mut mounts = 0usize;
+    let mut at = 0usize;
+
+    while at < bytes.len() {
+        let Some(next) = html[at..].find('<') else {
+            break
+        };
+        let open = at + next;
+
+        // A `<` in text that is not a tag start. `&lt;` is how a document says
+        // it means the character, and an artifact that does not is one whose
+        // author and this reader disagree about where elements begin.
+        let rest = &html[open..];
+        if rest.starts_with(SLOT_OPEN) {
+            let text = open + SLOT_OPEN.len();
+            let end = close_of(html, text)?;
+            slots.push(text..end);
+            at = end + SCRIPT_CLOSE.len();
+        } else if rest.starts_with(MODULE_OPEN) {
+            let text = open + MODULE_OPEN.len();
+            let end = close_of(html, text)?;
+            executables.push(text..end);
+            at = end + SCRIPT_CLOSE.len();
+        } else if rest[1..].to_ascii_lowercase().starts_with("script") {
+            // Any other script element: a `src`, a nonce, a classic script, an
+            // attribute in another order. Each is a shape this bridge has not
+            // reasoned about, and refusing costs a log line while guessing
+            // costs a wrong hash.
+            return Err(ArtifactError::UnreadableScript(open));
+        } else {
+            if rest.starts_with("<main id=\"libid-root\"></main>") {
+                mounts += 1;
+            }
+            at = ordinary_tag(html, open)?;
+        }
+    }
+
+    // Exactly one slot ELEMENT. Whether it still holds the marker is not asked
+    // here: this runs twice, once on the artifact and once on the composed
+    // document, and substitution is precisely what removes the marker.
+    // [`super::compose`] owns that rule.
+    if slots.len() != 1 {
+        return Err(ArtifactError::Markers(slots.len()));
+    }
+    let slot = slots.remove(0);
+    if executables.is_empty() || executables.len() > MAX_EXECUTABLES {
+        return Err(ArtifactError::Executables(executables.len()));
+    }
+    if mounts != 1 {
+        return Err(ArtifactError::MountPoint);
+    }
+    Ok(Layout { slot, executables })
+}
+
+/// Bytes that make the rest of this reader unsound, refused before anything
+/// else looks at the document.
+fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
+    // HASH CORRECTNESS. The HTML input stream normalises CR and CRLF to LF
+    // before tokenizing, so a `\r` inside a script means the browser hashes
+    // bytes this bridge never saw. The policy would then name a hash of
+    // something nobody executes.
+    if let Some(i) = html.find('\r') {
+        return Err(ArtifactError::Forbidden("a carriage return", i));
+    }
+    // HASH CORRECTNESS. Inside script data `<!--` enters the escaped states,
+    // where `</script>` no longer necessarily ends the element -- so "the first
+    // `</script>` terminates" quietly stops being true and the hashed span is
+    // shorter than the executed one. A generated bundle needs no comments.
+    if let Some(i) = html.find("<!--") {
+        return Err(ArtifactError::Forbidden("an HTML comment", i));
+    }
+    // HASH CORRECTNESS. In foreign content `<script>` is parsed as markup
+    // rather than raw text. Rather than track insertion modes, refuse the
+    // elements that open one.
+    for (needle, what) in [
+        ("<svg", "inline SVG"),
+        ("<math", "inline MathML"),
+        ("<![cdata[", "a CDATA section"),
+        ("<?", "a processing instruction"),
+    ] {
+        if let Some(i) = html.to_ascii_lowercase().find(needle) {
+            return Err(ArtifactError::Forbidden(what, i));
+        }
+    }
+    // Control bytes are not markup and not text a document needs.
+    if let Some(i) = html
+        .bytes()
+        .position(|b| b.is_ascii_control() && b != b'\n' && b != b'\t')
+    {
+        return Err(ArtifactError::Forbidden("a control byte", i));
+    }
+    Ok(())
+}
+
+/// The end of a script element's text, requiring the exact terminator.
+///
+/// `</script >` and `</script\n>` also close an element for a browser. Only the
+/// three-byte-plus-name form is read here, and the build escapes every other
+/// `</script` in its bundle as `<\/script`, so a document reaching the looser
+/// spellings is one this reader would measure differently from the browser.
+fn close_of(html: &str, text_start: usize) -> Result<usize, ArtifactError> {
+    let tail = &html[text_start..];
+    match tail.find(SCRIPT_CLOSE) {
+        // Nothing resembling a close before the real one, or the real one is
+        // the first thing that resembles it.
+        Some(i) => {
+            let end = text_start + i;
+            match tail[..i].to_ascii_lowercase().find("</script") {
+                None => Ok(end),
+                Some(j) => Err(ArtifactError::Malformed(text_start + j)),
+            }
+        }
+        None => Err(ArtifactError::Malformed(text_start)),
+    }
+}
+
+/// Step over one non-script tag, refusing any spelling this reader does not
+/// fully understand.
+///
+/// Deliberately narrow. It does not police inline handlers, `javascript:`,
+/// `<base>`, `<link>` or `<iframe>` -- the composed policy blocks every one of
+/// them with `script-src` hashes, `base-uri 'none'`, `default-src 'none'` and a
+/// CCDP-only `frame-src`. Keeping this small is what keeps it reviewable.
+fn ordinary_tag(html: &str, open: usize) -> Result<usize, ArtifactError> {
+    let bytes = html.as_bytes();
+    let mut i = open + 1;
+    if i >= bytes.len() {
+        return Err(ArtifactError::Malformed(open));
+    }
+    // `<!doctype html>` is the one `<!` this reader admits; `<!--` was already
+    // refused above.
+    if bytes[i] == b'!' {
+        if !html[open..].to_ascii_lowercase().starts_with("<!doctype ") {
+            return Err(ArtifactError::Malformed(open));
+        }
+        return end_of_tag(html, open, i);
+    }
+    if bytes[i] == b'/' {
+        i += 1;
+    }
+    let name_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_lowercase() {
+        i += 1;
+    }
+    if i == name_start {
+        // A `<` that opens no lowercase tag name. In text that means a bare
+        // `<`, which a document should have written `&lt;`.
+        return Err(ArtifactError::Malformed(open));
+    }
+    end_of_tag(html, open, i)
+}
+
+/// Walk to the `>` of a tag.
+///
+/// A double-quoted value is skipped whole, because a `>` inside one does not
+/// end the tag and a reader that stopped there would measure the document
+/// differently from the browser. An UNQUOTED value needs no such care: it
+/// cannot contain `>` by definition, so the first one still ends the tag.
+///
+/// A single-quoted value is refused rather than skipped. HTML admits it and a
+/// `>` inside one does not end the tag, so honouring it would mean tracking a
+/// second quoting style — and a build-generated artifact has no reason to use
+/// one. Refusing is cheaper than being subtly wrong about it.
+fn end_of_tag(html: &str, open: usize, mut i: usize) -> Result<usize, ArtifactError> {
+    let bytes = html.as_bytes();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'>' => return Ok(i + 1),
+            b'"' => {
+                let Some(j) = html[i + 1..].find('"') else {
+                    return Err(ArtifactError::Malformed(open));
+                };
+                i = i + 1 + j + 1;
+            }
+            // A single-quoted value, or a `<` where a tag has not closed.
+            b'\'' | b'<' => return Err(ArtifactError::Malformed(open)),
+            _ => i += 1,
+        }
+    }
+    Err(ArtifactError::Malformed(open))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A document in the canonical shape, with one thing varied per test. The
+    /// build emits exactly this shape, so a fixture that drifts from it would
+    /// be testing a document nobody serves.
+    fn doc(body: &str) -> String {
+        format!(
+            "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">\
+             <title>libID</title><body><main id=\"libid-root\"></main>\
+             <script id=\"libid-callback-config\" type=\"application/json\">\
+             {MARKER}</script>{body}</body></html>"
+        )
+    }
+
+    fn module(code: &str) -> String {
+        doc(&format!("<script type=\"module\">{code}</script>"))
+    }
+
+    #[test]
+    fn the_compiled_in_artifact_is_readable() {
+        let layout = scan(super::super::EMBEDDED).expect("the floor must scan");
+        assert_eq!(super::super::EMBEDDED[layout.slot].trim(), MARKER);
+        assert_eq!(layout.executables.len(), 1);
+    }
+
+    /// The hashed span is exactly the bytes between `>` and `</script>` --
+    /// neither tag included, nothing trimmed. A CSP hash covers that span and
+    /// nothing else, so an off-by-one here is a policy the browser rejects.
+    #[test]
+    fn the_executable_span_is_the_script_text_exactly() {
+        let html = module("let x = 1;");
+        let layout = scan(&html).unwrap();
+        assert_eq!(&html[layout.executables[0].clone()], "let x = 1;");
+    }
+
+    /// Three rules about hash correctness rather than tidiness. Each makes the
+    /// browser hash bytes this reader did not measure.
+    #[test]
+    fn bytes_that_would_desynchronise_the_hash_are_refused() {
+        // CR is normalised to LF by the HTML input stream before tokenizing.
+        assert!(matches!(
+            scan(&module("let x = 1;\r\n")),
+            Err(ArtifactError::Forbidden("a carriage return", _))
+        ));
+        // `<!--` in script data enters the escaped states, where `</script>`
+        // no longer necessarily closes the element.
+        assert!(matches!(
+            scan(&module("<!-- x -->")),
+            Err(ArtifactError::Forbidden("an HTML comment", _))
+        ));
+        // In foreign content `<script>` is markup, not raw text.
+        for hostile in ["<svg></svg>", "<math></math>", "<![CDATA[x]]>", "<?x?>"] {
+            assert!(
+                matches!(scan(&doc(hostile)), Err(ArtifactError::Forbidden(..))),
+                "accepted {hostile}"
+            );
+        }
+        assert!(matches!(
+            scan(&module("let x = 1;\u{0}")),
+            Err(ArtifactError::Forbidden("a control byte", _))
+        ));
+    }
+
+    /// Every script shape but the two this bridge reads. Each would otherwise
+    /// be hashed wrongly, or not hashed at all.
+    #[test]
+    fn a_script_this_reader_does_not_understand_is_refused() {
+        for hostile in [
+            "<script src=\"/x.js\"></script>",
+            "<script></script>",
+            "<script type=\"text/javascript\">x</script>",
+            "<script type=\"module\" defer>x</script>",
+            "<script nonce=\"abc\" type=\"module\">x</script>",
+            "<SCRIPT TYPE=\"module\">x</SCRIPT>",
+        ] {
+            assert!(
+                matches!(scan(&doc(hostile)), Err(ArtifactError::UnreadableScript(_))),
+                "accepted {hostile}"
+            );
+        }
+    }
+
+    /// `</script >` and `</script\n>` also close an element for a browser, so
+    /// a body containing one would end earlier for the browser than for this
+    /// reader. The build escapes every `</script` in its bundle for exactly
+    /// this reason.
+    #[test]
+    fn a_loose_close_inside_a_script_is_refused() {
+        for hostile in ["</script >", "</script\n>", "</SCRIPT>"] {
+            let html = module(&format!("let s = '{hostile}';"));
+            assert!(
+                matches!(scan(&html), Err(ArtifactError::Malformed(_))),
+                "accepted {hostile}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tag_this_reader_cannot_bound_is_refused() {
+        // A single-quoted value, whose `>` this reader would stop at and a
+        // browser would not, and a bare `<` a document should have written
+        // `&lt;`. An UNQUOTED value is fine and deliberately not listed: it
+        // cannot contain `>`, so the tag still ends where both agree.
+        for hostile in ["<p class='x'>", "<p>a < b</p>"] {
+            assert!(
+                matches!(
+                    scan(&doc(&format!(
+                        "{hostile}<script type=\"module\">x</script>"
+                    ))),
+                    Err(ArtifactError::Malformed(_))
+                ),
+                "accepted {hostile}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_document_carries_one_slot_one_mount_and_some_code() {
+        // Two slots.
+        let two = doc(
+            "<script id=\"libid-callback-config\" type=\"application/json\">x</script>\
+             <script type=\"module\">x</script>",
+        );
+        assert!(matches!(scan(&two), Err(ArtifactError::Markers(2))));
+
+        // No executable at all.
+        assert!(matches!(scan(&doc("")), Err(ArtifactError::Executables(0))));
+
+        // More than the shape admits.
+        let many: String = (0..MAX_EXECUTABLES + 1)
+            .map(|_| "<script type=\"module\">x</script>")
+            .collect();
+        assert!(matches!(
+            scan(&doc(&many)),
+            Err(ArtifactError::Executables(_))
+        ));
+
+        // No mount point, and two.
+        let no_mount = module("x").replace("<main id=\"libid-root\"></main>", "");
+        assert!(matches!(scan(&no_mount), Err(ArtifactError::MountPoint)));
+        let two_mounts = module("x").replace(
+            "<main id=\"libid-root\"></main>",
+            "<main id=\"libid-root\"></main><main id=\"libid-root\"></main>",
+        );
+        assert!(matches!(scan(&two_mounts), Err(ArtifactError::MountPoint)));
+    }
+
+    #[test]
+    fn an_artifact_over_the_bound_is_refused_before_it_is_read() {
+        let huge = "a".repeat(MAX_ARTIFACT_BYTES + 1);
+        assert!(
+            matches!(scan(&huge), Err(ArtifactError::TooLarge(n)) if n == huge.len())
+        );
+    }
+}
