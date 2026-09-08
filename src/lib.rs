@@ -115,6 +115,9 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             allowed_app_origins: &allowed_app_origins,
             style_hash,
         })?,
+        admits_same_origin_config: allowed_app_origins
+            .iter()
+            .any(|o| o == &server_origin),
         allowed_app_origins,
         callback_path,
         github,

@@ -67,6 +67,13 @@ pub struct AppState {
     pub(crate) callback_path: String,
     /// The callback document, rendered once with its finished policy.
     pub(crate) callback_shell: crate::shell::RenderedShell,
+    /// Whether this bridge's own origin is one of the admitted application
+    /// origins.
+    ///
+    /// Decides one thing: whether a same-origin `GET` carrying no `Origin` may
+    /// read the configuration. A deployment that does not admit itself has no
+    /// same-origin application to admit, so the exception is closed for it.
+    pub(crate) admits_same_origin_config: bool,
     /// The application origins admitted to read the public configuration.
     ///
     /// Exact strings, canonicalised at startup the same way this bridge's own
