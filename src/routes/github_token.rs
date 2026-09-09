@@ -72,26 +72,24 @@ const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 /// The field the profile orders last, and the only one committed rather than
 /// revealed. Ordered last so the committed run is a suffix of the body and not
 /// a hole in the middle of it.
-/// GitHub's notarized token session, from the generated profile table.
-///
-/// `libid-profiles` is generated in libid-contracts from the same
-/// `profiles.json` that `CeremonyProfile.sol` is, so what this prover reveals
-/// and what the Platform Verifier compares it against come from one place. The
-/// field name this service orders last in its request body is read from here
-/// rather than restated, because two spellings of one profile fact is exactly
-/// the drift that table exists to remove.
-fn token_session() -> ceremony::TokenSession {
-    ceremony::profiles::GITHUB
-        .token
-        .expect("github notarizes a token session")
-}
-
 /// The body field whose value is committed rather than revealed.
-fn secret_field() -> &'static str {
-    token_session()
-        .secret_field
-        .expect("github's token session commits a secret field")
-}
+///
+/// Named here rather than read from a profile table, because libid-rs stopped
+/// carrying one: `ceremony::token_request` now takes the field name as an
+/// argument, and every caller in libid-rs and the TypeScript verifier passes
+/// this same literal.
+///
+/// It is safe to restate precisely because it is not a libID fact to drift
+/// from. `client_secret` is OAuth 2.0's own parameter name (RFC 6749 §2.3.1),
+/// fixed by the protocol GitHub implements, so this service and the Platform
+/// Verifier agree on it for the same reason they agree on `code`.
+///
+/// What DOES have to hold is that this service orders the field last in the
+/// body it sends. The layout commits `&client_secret=` to the transcript end,
+/// so a field written anywhere else would leave a hole rather than a suffix
+/// and the layout would refuse it — see `body()` below, and the test that
+/// asserts the ordering.
+const SECRET_FIELD: &str = "client_secret";
 
 /// [`TOKEN_URL`] parsed, and the authority to send as `Host`.
 ///
@@ -546,7 +544,7 @@ fn token_request_body(creds: &OAuthCredentials, request: &TokenRequest) -> Strin
         .append_pair("code", &request.code)
         .append_pair("redirect_uri", &creds.redirect_uri)
         .append_pair("code_verifier", &request.code_verifier)
-        .append_pair(secret_field(), &creds.client_secret)
+        .append_pair(SECRET_FIELD, &creds.client_secret)
         .finish()
 }
 
@@ -664,8 +662,8 @@ struct Selection {
 /// direction's commitments are the complement of its reveals, so both tile by
 /// construction — which is what the verifier's coverage check demands.
 fn select_layouts(sent: &[u8], recv: &[u8]) -> Result<Selection, ceremony::LayoutError> {
-    let sent_layout = ceremony::Layout::token_request(sent, &token_session())?;
-    let recv_layout = ceremony::Layout::token_response(recv)?;
+    let sent_layout = ceremony::token_request(sent, Some(SECRET_FIELD))?;
+    let recv_layout = ceremony::token_response(recv)?;
     let bearer = bearer_range(&recv_layout)?;
     // `"access_token":""` frames an empty run, which the layout's complement
     // never commits -- so no opening would match it, and the failure would
@@ -959,8 +957,7 @@ mod tests {
     fn the_secret_is_the_only_thing_the_request_hides() {
         let credentials = credentials("ghs_averyrealisticlookingclientsecret00");
         let transcript = sent(&credentials, &request());
-        let layout =
-            ceremony::Layout::token_request(&transcript, &token_session()).unwrap();
+        let layout = ceremony::token_request(&transcript, Some(SECRET_FIELD)).unwrap();
 
         assert_eq!(layout.reveal.len(), 1, "one revealed prefix");
         assert_eq!(layout.reveal[0].start, 0);
@@ -1003,19 +1000,18 @@ mod tests {
 
         let pairs: Vec<_> = url::form_urlencoded::parse(body.as_bytes()).collect();
         assert_eq!(pairs.len(), 5, "five fields, whatever the secret contains");
-        assert_eq!(pairs[4].0, secret_field());
+        assert_eq!(pairs[4].0, SECRET_FIELD);
         assert_eq!(pairs[4].1, secret, "and it round-trips unmangled");
 
         let transcript = sent(&credentials, &request());
-        let layout =
-            ceremony::Layout::token_request(&transcript, &token_session()).unwrap();
+        let layout = ceremony::token_request(&transcript, Some(SECRET_FIELD)).unwrap();
         assert_eq!(layout.reveal.len(), 1);
 
         // Searched for as it appears ON THE WIRE. The raw bytes of a secret
         // carrying `&` or `=` occur nowhere in a percent-encoded body, so an
         // assertion against those would hold for any layout at all -- including
         // one that revealed the whole transcript.
-        let at = body.find(secret_field()).unwrap() + secret_field().len() + 1;
+        let at = body.find(SECRET_FIELD).unwrap() + SECRET_FIELD.len() + 1;
         let on_the_wire = &body.as_bytes()[at..];
         assert!(
             on_the_wire.starts_with(b"sk%26client_secret%3D"),
@@ -1180,7 +1176,7 @@ mod tests {
     /// framed value exactly.
     #[test]
     fn the_bearer_range_is_the_value_between_the_anchors() {
-        let layout = ceremony::Layout::token_response(RECV).unwrap();
+        let layout = ceremony::token_response(RECV).unwrap();
         let range = bearer_range(&layout).unwrap();
 
         assert_eq!(

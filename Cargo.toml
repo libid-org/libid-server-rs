@@ -21,17 +21,24 @@ publish = false
 # holds no signing key. Nothing else here needs it — the notary digest is
 # only ever verified, never signed.
 # Pinned to a REVISION, not a tag, and deliberately: the ceremony
-# constructions this service needs live on libid-rs#2 and are not in any
-# release yet. The revision carries the merged alpha.15 upgrade as well, so
-# this is the release graph plus that one branch. Move to the tag the day
-# libid-rs cuts one containing `libid-ceremony`.
-libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "25d182d2e506cc6e9d7304319823c5f2d717d308" }
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "25d182d2e506cc6e9d7304319823c5f2d717d308" }
-libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "25d182d2e506cc6e9d7304319823c5f2d717d308" }
+# constructions this service needs are not in any release yet. Move to the tag
+# the day libid-rs cuts one containing `libid-ceremony`.
+#
+# This particular revision is the one the NOTARY pins, and that is the whole
+# reason it is this one. TLSNotary gates a session on a protocol version, so a
+# prover built against alpha.15 cannot talk to a verifier built against
+# alpha.16-pre at all -- it fails at "Setting up MPC-TLS" with
+# `prover version does not match with verifier`, before any ceremony logic
+# runs. Matching the notary's revision, and the `[patch]` block below that
+# redirects tlsn onto the same fork, is what makes the two speak.
+libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
 # Upstream TLSNotary is NOT a direct dependency. Everything this service reads
 # off a session — `CommitmentOpening` and the `Direction` it carries — comes
-# re-exported from libid-tlsn, which pins tlsn itself. One pin, so the graph
-# cannot hold two incompatible copies of the same types.
+# re-exported from libid-tlsn. What libid-tlsn pins is then overridden by the
+# `[patch]` at the end of this file, so the effective tlsn is the fork's and
+# there is still exactly one copy in the graph.
 
 # ── HTTP server / client ────────────────────────────────────────────────
 axum = "0.8"
@@ -68,3 +75,43 @@ url = "2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+
+# ── TLSNotary fork ──────────────────────────────────────────────────────
+# Copied VERBATIM from the notary's Cargo.toml, and it has to stay that way:
+# tlsn refuses a session whose peer reports a different protocol version, so
+# the prover here and the verifier there must resolve to the same tlsn. When
+# the notary moves, this moves with it in the same change.
+[patch."https://github.com/tlsnotary/tlsn"]
+# WIP: TLSNotary #1178 reclaims the channel, #1179 preserves hash-opening
+# order, and #1173 fixes RCOT preprocessing deadlocks. Return to a release
+# containing all three fixes when available.
+tlsn = { git = "https://github.com/libid-org/tlsn", rev = "8a5de746f73bbe3476a3b10ce411fde3c87e479d" }
+
+# TLSNotary #1173 also needs privacy-ethereum/mpz#446 KOS instance-domain
+# separation. Cargo ignores dependency-workspace patches, so repeat TLSN's
+# matching alpha.6-compatible pin here for the server and test clients.
+[patch."https://github.com/privacy-ethereum/mpz"]
+clmul = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+matrix-transpose = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-circuits = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-circuits-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-circuits-data = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-cointoss = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-cointoss-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-common = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-fields = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-garble = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-garble-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-hash = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-ideal-vm = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-memory-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-ole = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-ole-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-ot = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-ot-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-share-conversion = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-share-conversion-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-vm-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-zk = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+mpz-zk-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
