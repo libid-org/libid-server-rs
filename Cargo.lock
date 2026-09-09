@@ -1601,7 +1601,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libid-ceremony"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=4e89f55ccc6036b824b4ece3c1ae950d59cece53#4e89f55ccc6036b824b4ece3c1ae950d59cece53"
+source = "git+https://github.com/libid-org/libid-rs?rev=25d182d2e506cc6e9d7304319823c5f2d717d308#25d182d2e506cc6e9d7304319823c5f2d717d308"
 dependencies = [
  "bincode 2.0.1",
  "libid-crypto",
@@ -1611,7 +1611,7 @@ dependencies = [
 [[package]]
 name = "libid-crypto"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=4e89f55ccc6036b824b4ece3c1ae950d59cece53#4e89f55ccc6036b824b4ece3c1ae950d59cece53"
+source = "git+https://github.com/libid-org/libid-rs?rev=25d182d2e506cc6e9d7304319823c5f2d717d308#25d182d2e506cc6e9d7304319823c5f2d717d308"
 dependencies = [
  "hex",
  "k256",
@@ -1619,6 +1619,12 @@ dependencies = [
  "thiserror 2.0.20",
  "tiny-keccak",
 ]
+
+[[package]]
+name = "libid-profiles"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7632c18090e9053a04d7cc34e7b2fe3af310b72930593236604bcbe6f0ea80d0"
 
 [[package]]
 name = "libid-server-rs"
@@ -1648,7 +1654,7 @@ dependencies = [
 [[package]]
 name = "libid-tlsn"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=4e89f55ccc6036b824b4ece3c1ae950d59cece53#4e89f55ccc6036b824b4ece3c1ae950d59cece53"
+source = "git+https://github.com/libid-org/libid-rs?rev=25d182d2e506cc6e9d7304319823c5f2d717d308#25d182d2e506cc6e9d7304319823c5f2d717d308"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -1666,9 +1672,10 @@ dependencies = [
 [[package]]
 name = "libid-transcript"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=4e89f55ccc6036b824b4ece3c1ae950d59cece53#4e89f55ccc6036b824b4ece3c1ae950d59cece53"
+source = "git+https://github.com/libid-org/libid-rs?rev=25d182d2e506cc6e9d7304319823c5f2d717d308#25d182d2e506cc6e9d7304319823c5f2d717d308"
 dependencies = [
  "httparse",
+ "libid-profiles",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

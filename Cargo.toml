@@ -25,9 +25,9 @@ publish = false
 # release yet. The revision carries the merged alpha.15 upgrade as well, so
 # this is the release graph plus that one branch. Move to the tag the day
 # libid-rs cuts one containing `libid-ceremony`.
-libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "4e89f55ccc6036b824b4ece3c1ae950d59cece53" }
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "4e89f55ccc6036b824b4ece3c1ae950d59cece53" }
-libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "4e89f55ccc6036b824b4ece3c1ae950d59cece53" }
+libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "25d182d2e506cc6e9d7304319823c5f2d717d308" }
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "25d182d2e506cc6e9d7304319823c5f2d717d308" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "25d182d2e506cc6e9d7304319823c5f2d717d308" }
 # Upstream TLSNotary is NOT a direct dependency. Everything this service reads
 # off a session — `CommitmentOpening` and the `Direction` it carries — comes
 # re-exported from libid-tlsn, which pins tlsn itself. One pin, so the graph
