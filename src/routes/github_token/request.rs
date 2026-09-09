@@ -7,6 +7,7 @@
 
 use axum::http::header;
 use libid_ceremony::token_exchange::TokenRequest;
+use libid_transcript::ceremony;
 
 use crate::oauth::OAuthCredentials;
 
@@ -15,24 +16,34 @@ use crate::oauth::OAuthCredentials;
 /// secret against a host of the caller's choosing.
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
-/// The body field whose value is committed rather than revealed.
+/// GitHub's token session, as the generated profile table declares it.
 ///
-/// Named here rather than read from a profile table, because libid-rs stopped
-/// carrying one: `ceremony::token_request` now takes the field name as an
-/// argument, and every caller in libid-rs and the TypeScript verifier passes
-/// this same literal.
+/// The layout is built from this rather than from arguments this service
+/// chooses, and that is the point: `libid-profiles` is generated in
+/// libid-contracts from the same `profiles.json` the Platform Verifier is
+/// generated from, so what this service commits and what the verifier expects
+/// come from one file. A local restatement of any of it would be a second copy
+/// of values whose whole problem is that copies drift in silence.
 ///
-/// It is safe to restate precisely because it is not a libID fact to drift
-/// from. `client_secret` is OAuth 2.0's own parameter name (RFC 6749 §2.3.1),
-/// fixed by the protocol GitHub implements, so this service and the Platform
-/// Verifier agree on it for the same reason they agree on `code`.
+/// A `const` with a `panic!` arm, so a profile table that stopped declaring a
+/// GitHub token session would fail this build rather than this route.
+pub(super) const TOKEN_SESSION: ceremony::TokenSession =
+    match ceremony::profiles::GITHUB.token {
+        Some(session) => session,
+        None => panic!("the github profile notarizes a token session"),
+    };
+
+/// The body field this service commits rather than reveals.
 ///
-/// What DOES have to hold is that this service orders the field last in the
-/// body it sends. The layout commits `&client_secret=` to the transcript end,
-/// so a field written anywhere else would leave a hole rather than a suffix
-/// and the layout would refuse it — see `body()` below, and the test that
-/// asserts the ordering.
-pub(super) const SECRET_FIELD: &str = "client_secret";
+/// Read off the profile rather than written here, and that is the point: the
+/// same table the Platform Verifier is generated from decides which field the
+/// layout commits, so the field this service ORDERS LAST and the field the
+/// notary's layout looks for cannot be two different strings. A local
+/// `"client_secret"` said the same thing until the day it did not.
+pub(super) const SECRET_FIELD: &str = match TOKEN_SESSION.secret_field {
+    Some(field) => field,
+    None => panic!("the github token session commits a body field"),
+};
 
 /// [`TOKEN_URL`] parsed, and the authority to send as `Host`.
 ///
@@ -140,7 +151,8 @@ mod tests {
     fn the_secret_is_the_only_thing_the_request_hides() {
         let credentials = credentials("ghs_averyrealisticlookingclientsecret00");
         let transcript = sent(&credentials, &request());
-        let layout = ceremony::token_request(&transcript, Some(SECRET_FIELD)).unwrap();
+        let layout =
+            ceremony::Layout::token_request(&transcript, &TOKEN_SESSION).unwrap();
 
         assert_eq!(layout.reveal.len(), 1, "one revealed prefix");
         assert_eq!(layout.reveal[0].start, 0);
@@ -187,7 +199,8 @@ mod tests {
         assert_eq!(pairs[4].1, secret, "and it round-trips unmangled");
 
         let transcript = sent(&credentials, &request());
-        let layout = ceremony::token_request(&transcript, Some(SECRET_FIELD)).unwrap();
+        let layout =
+            ceremony::Layout::token_request(&transcript, &TOKEN_SESSION).unwrap();
         assert_eq!(layout.reveal.len(), 1);
 
         // Searched for as it appears ON THE WIRE. The raw bytes of a secret

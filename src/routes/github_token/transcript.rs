@@ -16,7 +16,7 @@ use libid_transcript::ceremony;
 
 use crate::error::Error;
 
-use super::request::SECRET_FIELD;
+use super::request::TOKEN_SESSION;
 
 /// Where the bearer sits in the received transcript, per the response layout.
 ///
@@ -84,8 +84,8 @@ pub(super) struct Selection {
 /// construction — which is what the verifier's coverage check demands.
 impl Selection {
     pub(super) fn of(sent: &[u8], recv: &[u8]) -> Result<Self, ceremony::LayoutError> {
-        let sent_layout = ceremony::token_request(sent, Some(SECRET_FIELD))?;
-        let recv_layout = ceremony::token_response(recv)?;
+        let sent_layout = ceremony::Layout::token_request(sent, &TOKEN_SESSION)?;
+        let recv_layout = ceremony::Layout::token_response(recv)?;
         let bearer = bearer_range(&recv_layout)?;
         // `"access_token":""` frames an empty run, which the layout's complement
         // never commits -- so no opening would match it, and the failure would
@@ -358,7 +358,7 @@ mod tests {
     /// framed value exactly.
     #[test]
     fn the_bearer_range_is_the_value_between_the_anchors() {
-        let layout = ceremony::token_response(RECV).unwrap();
+        let layout = ceremony::Layout::token_response(RECV).unwrap();
         let range = bearer_range(&layout).unwrap();
 
         assert_eq!(

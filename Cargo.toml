@@ -24,16 +24,24 @@ publish = false
 # constructions this service needs are not in any release yet. Move to the tag
 # the day libid-rs cuts one containing `libid-ceremony`.
 #
-# This particular revision is the one the NOTARY pins, and that is the whole
-# reason it is this one. TLSNotary gates a session on a protocol version, so a
-# prover built against alpha.15 cannot talk to a verifier built against
-# alpha.16-pre at all -- it fails at "Setting up MPC-TLS" with
-# `prover version does not match with verifier`, before any ceremony logic
-# runs. Matching the notary's revision, and the `[patch]` block below that
-# redirects tlsn onto the same fork, is what makes the two speak.
-libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
-libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "cafd9a0b3b3c1c4a2e735a279e5904e4d0e19471" }
+# This is libid-rs `main`, at the merge of #2. It is what makes the ceremony
+# complete: before it, the verifier read a finished mux driver as a dead
+# connection at every stage, so the prover's own `handle.close()` aborted every
+# successful session before the attestation was signed. `8954d84` is that fix,
+# and `origin_form` beside it is the request-target one -- hyper writes an
+# absolute-form request line, which is reserved for a proxy, and the Platform
+# Verifier compares the revealed path against a profile constant.
+#
+# TLSNotary also gates a session on a protocol version, so a prover built
+# against alpha.15 cannot talk to a verifier built against alpha.16-pre at all
+# -- it fails at "Setting up MPC-TLS" with `prover version does not match with
+# verifier`, before any ceremony logic runs. libid-rs pins upstream tlsn at the
+# alpha.15 tag; the `[patch]` block at the end of this file redirects it onto
+# the fork the NOTARY runs, and that is what makes the two speak. When the
+# notary moves, that block moves with it -- this pin does not.
+libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0" }
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0" }
 # Upstream TLSNotary is NOT a direct dependency. Everything this service reads
 # off a session — `CommitmentOpening` and the `Direction` it carries — comes
 # re-exported from libid-tlsn. What libid-tlsn pins is then overridden by the
