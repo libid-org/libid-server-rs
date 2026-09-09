@@ -93,19 +93,13 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         cfg.gh_oauth_client_secret.as_str(),
     ) {
         (Some(profile), secret) if !secret.is_empty() => {
-            let addr = notary_addr(&cfg.notary_url)?;
             Some(Arc::new(state::GithubExchange {
                 credentials: oauth::OAuthCredentials {
                     client_id: profile.client_id.clone(),
                     client_secret: secret.to_owned(),
                     redirect_uri: redirect_uri.clone(),
                 },
-                notary_addr: addr.clone(),
-                notary_host: addr
-                    .rsplit_once(':')
-                    .expect("notary_addr is built as host:port")
-                    .0
-                    .to_owned(),
+                notary: notary_addr(&cfg.notary_url)?,
                 ccdp_origin: ccdp_origin.clone(),
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
@@ -401,7 +395,7 @@ fn callback_path(path: &str) -> Result<String> {
 /// The scheme is not consulted: the Rust prover speaks the notary's raw TCP
 /// protocol, and `tcp://` is how the default spells that. What must be there
 /// is an authority, because a session cannot be opened without one.
-fn notary_addr(url: &Url) -> Result<String> {
+fn notary_addr(url: &Url) -> Result<state::NotaryAddr> {
     let host = url.host_str().ok_or_else(|| Error::NotaryUrl {
         detail: format!("{url} names no host"),
     })?;
@@ -414,7 +408,10 @@ fn notary_addr(url: &Url) -> Result<String> {
         .ok_or_else(|| Error::NotaryUrl {
             detail: format!("{url} names no port, and its scheme implies none"),
         })?;
-    Ok(format!("{host}:{port}"))
+    Ok(state::NotaryAddr {
+        host: host.to_owned(),
+        port,
+    })
 }
 
 #[cfg(test)]
@@ -507,7 +504,10 @@ mod tests {
     #[test]
     fn a_notary_url_is_resolved_to_a_dialable_address_at_startup() {
         let state = build_state(&config(&[])).unwrap();
-        assert_eq!(state.github.as_ref().unwrap().notary_addr, "127.0.0.1:7047");
+        assert_eq!(
+            state.github.as_ref().unwrap().notary.socket(),
+            "127.0.0.1:7047"
+        );
         assert!(build_state(&config(&["--notary-url", "tcp://notary.example"])).is_err());
     }
 
@@ -619,7 +619,7 @@ mod tests {
             ("tcp://127.0.0.1:7047", "127.0.0.1:7047"),
         ] {
             let parsed = Url::parse(url).unwrap();
-            assert_eq!(notary_addr(&parsed).unwrap(), expected, "{url}");
+            assert_eq!(notary_addr(&parsed).unwrap().socket(), expected, "{url}");
         }
         // `tcp` has no known default, which is the case the message describes.
         assert!(notary_addr(&Url::parse("tcp://notary.example").unwrap()).is_err());
@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn a_tcp_notary_url_yields_its_authority() {
         let url = Url::parse("tcp://127.0.0.1:7047").unwrap();
-        assert_eq!(notary_addr(&url).unwrap(), "127.0.0.1:7047");
+        assert_eq!(notary_addr(&url).unwrap().socket(), "127.0.0.1:7047");
     }
 
     /// The prover speaks the notary's raw TCP protocol, so there is no port to

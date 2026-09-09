@@ -37,6 +37,37 @@ pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
 /// the token route's own state -- so it is mounted with them or it is not
 /// mounted. There is no deployment that holds a notary address nothing dials,
 /// and no request that has to check whether the state and the router agree.
+/// Where this bridge's notary is, kept as its parts.
+///
+/// Both are wanted separately -- the socket to dial and the host to compare a
+/// request's `notaryAddress` against -- and joining them into one string only
+/// to split it again is how the split acquires a failure case that the join
+/// had already ruled out.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NotaryAddr {
+    /// The host, and what a request's `notaryAddress` is compared against. The
+    /// port is NOT compared: the request carries the endpoint a browser Prover
+    /// reaches while this bridge dials the TCP wire listener, so one notary is
+    /// two ports.
+    pub(crate) host: String,
+    /// The port this bridge connects to.
+    pub(crate) port: u16,
+}
+
+impl NotaryAddr {
+    /// What a TCP connect takes.
+    pub(crate) fn socket(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+/// Everything the confidential exchange needs, and nothing any other route
+/// does.
+///
+/// These values are meaningful only where GitHub is enabled, and this is the
+/// token route's own state -- so it is mounted with them or it is not mounted.
+/// There is no deployment that holds a notary address nothing dials, and no
+/// request that has to check whether the state and the router agree.
 pub struct GithubExchange {
     /// GitHub's confidential client. The secret never leaves this process and
     /// is never revealed in a notarized transcript.
@@ -47,17 +78,7 @@ pub struct GithubExchange {
     /// Resolved from the configured URL once at startup, so a notary URL that
     /// names no host or no port stops the process from coming up rather than
     /// failing the first ceremony that reaches it.
-    pub(crate) notary_addr: String,
-    /// The host of [`Self::notary_addr`], which is what a request's
-    /// `notaryAddress` is compared against -- see
-    /// [`crate::routes::github_token`]. The port is NOT compared: the request
-    /// carries the endpoint a browser Prover reaches and this bridge dials the
-    /// TCP wire listener, so one notary is two ports.
-    ///
-    /// Split once here rather than per request. The value is fixed for the
-    /// process, and splitting it on the request path put a branch in the hot
-    /// path that no input could reach.
-    pub(crate) notary_host: String,
+    pub(crate) notary: NotaryAddr,
     /// The CCDP Distribution this bridge selects, and the ONLY origin the
     /// token route admits.
     ///

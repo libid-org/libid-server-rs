@@ -410,28 +410,28 @@ mod tests {
         ));
     }
 
-    /// A localised artifact must be REFUSED, not panic the process.
+    /// A localised artifact must SCAN, not panic and not be refused.
     ///
+    /// Non-ASCII in markup is ordinary, so the contract here is acceptance.
     /// Every one of these puts a multi-byte character at the byte index the
-    /// foreign-content and script checks read. Slicing `&str` there panics;
-    /// the bridge would abort at startup instead of naming the setting.
+    /// foreign-content and script tests read; slicing `&str` there panics.
+    /// Asserting only "does not unwind" would pass on a reader that refused
+    /// every localised document, which is the other way to get this wrong.
     #[test]
-    fn a_multi_byte_character_after_a_short_tag_is_refused_not_a_panic() {
-        for html in [
-            "<p>\u{e9}",
-            "<b>\u{2014}",
-            "<em>\u{e9}",
-            "<h1>\u{e9}",
-            "<p>abc\u{e9}",
+    fn a_multi_byte_character_scans_rather_than_panicking() {
+        for text in [
+            "<p>\u{e9}</p>",
+            "<b>\u{2014}</b>",
+            "<em>\u{e9}</em>",
+            "<h1>\u{e9}</h1>",
+            "<p>abc\u{e9}</p>",
         ] {
-            let doc = format!(
-                "<!doctype html><html><body>{html}<script \
-                 id=\"libid-callback-config\" \
-                 type=\"application/json\">{}</script></body></html>",
-                super::MARKER
+            let html = doc(&format!("{text}<script type=\"module\">let a=1</script>"));
+            let out = Layout::scan(&html);
+            assert!(
+                out.is_ok(),
+                "a localised artifact must scan: {text} -> {out:?}"
             );
-            // The contract is only that it returns rather than unwinds.
-            let _ = Layout::scan(&doc);
         }
     }
 

@@ -426,10 +426,10 @@ pub(crate) async fn github_token(
     let asked = notary_host(&body.notary_address).ok_or_else(|| {
         TokenError::bad_request("notaryAddress is not a canonical HTTPS origin")
     })?;
-    if asked != github.notary_host {
+    if asked != github.notary.host {
         tracing::warn!(
             asked = %asked,
-            serves = %github.notary_host,
+            serves = %github.notary.host,
             "refused a token request naming a notary this deployment does not serve"
         );
         return Err(TokenError {
@@ -796,7 +796,7 @@ async fn exchange(
     request: &TokenRequest,
 ) -> Result<TokenResponse, Error> {
     let http_request = token_http_request(&github.credentials, request);
-    let socket = connect_notary(&github.notary_addr).await?;
+    let socket = connect_notary(&github.notary.socket()).await?;
 
     // What the layout decided, kept from inside the session. The bearer's
     // offsets index the raw received transcript, so neither they nor the bytes
