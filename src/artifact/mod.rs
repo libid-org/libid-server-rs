@@ -104,8 +104,12 @@ impl CallbackDocument {
         // must occur nowhere else -- a second occurrence inside a bundled string
         // literal would make "repeated markers reject the artifact" depend on
         // which one a reader found first.
+        // `nth(1)`, not `count() != 1`: the slot already holds one, so the
+        // question is whether a SECOND exists, and that stops at the second
+        // rather than walking a 4 MiB document to the end to report a number
+        // nothing reads.
         if html[layout.slot.clone()].trim() != scan::MARKER
-            || html.matches(scan::MARKER).count() != 1
+            || html.matches(scan::MARKER).nth(1).is_some()
         {
             return Err(ArtifactError::Marker);
         }
@@ -198,8 +202,10 @@ fn hash_source(script: &str) -> String {
 fn json(value: &serde_json::Value) -> String {
     use std::fmt::Write as _;
 
-    let mut out = String::new();
-    for c in value.to_string().chars() {
+    let rendered = value.to_string();
+    // Escaping only ever grows, so the rendered length is the floor.
+    let mut out = String::with_capacity(rendered.len());
+    for c in rendered.chars() {
         match c {
             // `write!` into the buffer rather than `push_str(&format!(..))`,
             // which allocated a `String` per escaped character.

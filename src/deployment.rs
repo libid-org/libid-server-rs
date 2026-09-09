@@ -107,7 +107,8 @@ pub fn platforms(json: &str) -> Result<Vec<PlatformProfile>> {
 
     for p in &profiles {
         let id = p.id.as_str();
-        if profiles.iter().filter(|q| q.id == p.id).count() > 1 {
+        // "Is there another one" rather than "how many are there".
+        if profiles.iter().filter(|q| q.id == p.id).nth(1).is_some() {
             return Err(refuse(format!("{id} appears more than once")));
         }
         if p.client_id.is_empty() {
@@ -117,7 +118,7 @@ pub fn platforms(json: &str) -> Result<Vec<PlatformProfile>> {
             return Err(refuse(format!("{id} advertises no version")));
         }
         for v in &p.versions {
-            if p.versions.iter().filter(|w| *w == v).count() > 1 {
+            if p.versions.iter().filter(|w| *w == v).nth(1).is_some() {
                 return Err(refuse(format!(
                     "{id} advertises version {v} more than once"
                 )));
