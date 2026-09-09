@@ -418,16 +418,27 @@ pub(crate) async fn github_token(
     // open here -- and when the transport moves to `wss://{notaryAddress}` the
     // configured value is what disappears, not this check.
     //
-    // Compared as `host:port`, because the two spell the same service
-    // differently: the request carries an HTTPS origin and this bridge dials
-    // the notary's own TCP endpoint.
-    let asked = canonical_notary(&body.notary_address).ok_or_else(|| {
+    // Compared by HOST, not `host:port`. The two name one service over
+    // different transports and therefore different ports: a browser Prover
+    // reaches the notary's WebSocket endpoint, this bridge dials its TCP wire
+    // listener, and a deployment that runs both on one host is the normal
+    // case. Requiring the ports to agree would refuse every such deployment.
+    //
+    // Nothing is lost by ignoring it: this bridge dials its CONFIGURED address
+    // whatever the request says, so the port in the request is not a
+    // destination and never was. What the check establishes is that the caller
+    // and this deployment mean the same notary.
+    let asked = notary_host(&body.notary_address).ok_or_else(|| {
         TokenError::bad_request("notaryAddress is not a canonical HTTPS origin")
     })?;
-    if asked != github.notary_addr {
+    let serves = github
+        .notary_addr
+        .rsplit_once(':')
+        .map_or(github.notary_addr.as_str(), |(host, _)| host);
+    if asked != serves {
         tracing::warn!(
             asked = %asked,
-            serves = %github.notary_addr,
+            serves = %serves,
             "refused a token request naming a notary this deployment does not serve"
         );
         return Err(TokenError {
@@ -486,14 +497,14 @@ pub(crate) async fn github_token(
         .into_response())
 }
 
-/// The `host:port` a canonical HTTPS notary origin names, or `None`.
+/// The host a canonical HTTPS notary origin names, or `None`.
 ///
 /// Deliberately narrow, because this value arrives in a request: HTTPS only, no
 /// credentials, path, query or fragment, and a host whose bytes are what a host
 /// is made of. It is the same shape [`crate::canonical_origin`] holds a
 /// configured origin to, minus that function's development exception for
 /// loopback `http` -- a caller does not get to name a plaintext destination.
-fn canonical_notary(spelling: &str) -> Option<String> {
+fn notary_host(spelling: &str) -> Option<String> {
     let url = url::Url::parse(spelling).ok()?;
     if url.scheme() != "https"
         || !matches!(url.path(), "" | "/")
@@ -511,7 +522,7 @@ fn canonical_notary(spelling: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!("{host}:{}", url.port_or_known_default()?))
+    Some(host.to_owned())
 }
 
 /// How every byte string in the response is spelled: unpadded URL-safe base64.

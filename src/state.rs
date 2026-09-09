@@ -44,6 +44,10 @@ pub struct GithubExchange {
     /// The notary this bridge opens its token session against, as the
     /// `host:port` a TCP connect takes.
     ///
+    /// Its HOST is also what a request's `notaryAddress` is checked against --
+    /// see [`crate::routes::github_token`]. The port is not, because the two
+    /// name one service over different transports.
+    ///
     /// Resolved from the configured URL once at startup, so a notary URL that
     /// names no host or no port stops the process from coming up rather than
     /// failing the first ceremony that reaches it.

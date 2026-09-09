@@ -127,9 +127,11 @@ async fn post_token(origin: Option<&str>, body: String) -> axum::response::Respo
 }
 
 /// The notary the fixture's `--notary-url tcp://127.0.0.1:7047` serves, spelled
-/// as a request carries it: a canonical HTTPS origin. The two are compared as
-/// `host:port`, which is what makes those two spellings one notary.
-const NOTARY: &str = "https://127.0.0.1:7047";
+/// as a request carries it: a canonical HTTPS origin. Deliberately on a
+/// DIFFERENT port, because that is the real case -- a browser Prover reaches
+/// the notary's WebSocket endpoint while this bridge dials its TCP wire
+/// listener, and only the host says they mean the same service.
+const NOTARY: &str = "https://127.0.0.1:7048";
 
 fn valid_body() -> String {
     format!(
@@ -777,9 +779,10 @@ async fn github_token_takes_exactly_one_media_type() {
 /// otherwise -- so nothing caller-supplied reaches a socket.
 #[tokio::test]
 async fn github_token_requires_the_notary_it_serves() {
-    // Spelled differently from `--notary-url`, and the same notary: the request
-    // carries an HTTPS origin, the bridge dials a TCP endpoint, and `host:port`
-    // is what they agree on.
+    // Spelled differently from `--notary-url`, on a different port, and the
+    // same notary: the request carries the WebSocket endpoint a Prover uses,
+    // the bridge dials the TCP wire listener, and the host is what says they
+    // mean one service.
     let resp = post_token(Some(ORIGIN), valid_body()).await;
     assert_ne!(
         resp.status(),
@@ -791,7 +794,7 @@ async fn github_token_requires_the_notary_it_serves() {
     for other in [
         "https://notary.lib.id",
         "https://testnet.notary.lib.id",
-        "https://127.0.0.1:9999",
+        "https://127.0.0.2:7047",
     ] {
         let body = format!(
             r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{other}"}}"#
@@ -806,11 +809,11 @@ async fn github_token_requires_the_notary_it_serves() {
 #[tokio::test]
 async fn github_token_refuses_a_notary_address_that_is_not_a_bare_https_origin() {
     for bad in [
-        "http://127.0.0.1:7047",
-        "127.0.0.1:7047",
-        "https://127.0.0.1:7047/path",
-        "https://127.0.0.1:7047?q=1",
-        "https://user:pw@127.0.0.1:7047",
+        "http://127.0.0.1:7048",
+        "127.0.0.1:7048",
+        "https://127.0.0.1:7048/path",
+        "https://127.0.0.1:7048?q=1",
+        "https://user:pw@127.0.0.1:7048",
         "https://a;b.example",
         "not a url",
         "",
@@ -843,7 +846,7 @@ async fn github_token_refuses_a_body_without_a_notary_address() {
 async fn github_token_admits_the_ccdp_origin_and_nothing_else() {
     // A body the NEXT check refuses, so admission is proved without opening a
     // notary session.
-    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort","notaryAddress":"https://127.0.0.1:7047"}"#;
+    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort","notaryAddress":"https://127.0.0.1:7048"}"#;
     let post = |origins: Vec<&'static str>| async move {
         let mut req = Request::post("/api/v1/ceremony/github-token")
             .header("content-type", "application/json");
