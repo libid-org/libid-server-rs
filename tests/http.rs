@@ -777,17 +777,30 @@ async fn github_token_takes_exactly_one_media_type() {
 /// travels in the request. This bridge does not dial what a caller names: it
 /// checks the request names the notary it already serves, and refuses
 /// otherwise -- so nothing caller-supplied reaches a socket.
+/// A body naming the notary this deployment serves, refused by the gate AFTER
+/// the notary check. `codeVerifier` is short, which `validate()` rejects.
+fn admitted_notary_but_invalid_body() -> String {
+    format!(
+        r#"{{"code":"abcdef1234567890","codeVerifier":"tooshort","notaryAddress":"{NOTARY}"}}"#
+    )
+}
+
 #[tokio::test]
 async fn github_token_requires_the_notary_it_serves() {
     // Spelled differently from `--notary-url`, on a different port, and the
     // same notary: the request carries the WebSocket endpoint a Prover uses,
     // the bridge dials the TCP wire listener, and the host is what says they
     // mean one service.
-    let resp = post_token(Some(ORIGIN), valid_body()).await;
-    assert_ne!(
+    // Deliberately NOT `valid_body()`. The notary check runs before
+    // `validate()`, so a body that this deployment's notary admits and the
+    // NEXT gate refuses proves admission without taking a permit or dialling
+    // anything -- which a fully valid body here would do, spending the fixture
+    // client secret against github.com on any machine running a local notary.
+    let resp = post_token(Some(ORIGIN), admitted_notary_but_invalid_body()).await;
+    assert_eq!(
         resp.status(),
-        StatusCode::FORBIDDEN,
-        "the notary this deployment serves must be admitted"
+        StatusCode::BAD_REQUEST,
+        "the served notary must be admitted, and the request refused after it"
     );
 
     // A different notary is refused, and refused as such.

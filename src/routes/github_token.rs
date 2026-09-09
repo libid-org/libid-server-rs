@@ -69,9 +69,6 @@ use crate::{
 /// secret against a host of the caller's choosing.
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
-/// The field the profile orders last, and the only one committed rather than
-/// revealed. Ordered last so the committed run is a suffix of the body and not
-/// a hole in the middle of it.
 /// The body field whose value is committed rather than revealed.
 ///
 /// Named here rather than read from a profile table, because libid-rs stopped
@@ -429,14 +426,10 @@ pub(crate) async fn github_token(
     let asked = notary_host(&body.notary_address).ok_or_else(|| {
         TokenError::bad_request("notaryAddress is not a canonical HTTPS origin")
     })?;
-    let serves = github
-        .notary_addr
-        .rsplit_once(':')
-        .map_or(github.notary_addr.as_str(), |(host, _)| host);
-    if asked != serves {
+    if asked != github.notary_host {
         tracing::warn!(
             asked = %asked,
-            serves = %serves,
+            serves = %github.notary_host,
             "refused a token request naming a notary this deployment does not serve"
         );
         return Err(TokenError {

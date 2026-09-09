@@ -44,14 +44,20 @@ pub struct GithubExchange {
     /// The notary this bridge opens its token session against, as the
     /// `host:port` a TCP connect takes.
     ///
-    /// Its HOST is also what a request's `notaryAddress` is checked against --
-    /// see [`crate::routes::github_token`]. The port is not, because the two
-    /// name one service over different transports.
-    ///
     /// Resolved from the configured URL once at startup, so a notary URL that
     /// names no host or no port stops the process from coming up rather than
     /// failing the first ceremony that reaches it.
     pub(crate) notary_addr: String,
+    /// The host of [`Self::notary_addr`], which is what a request's
+    /// `notaryAddress` is compared against -- see
+    /// [`crate::routes::github_token`]. The port is NOT compared: the request
+    /// carries the endpoint a browser Prover reaches and this bridge dials the
+    /// TCP wire listener, so one notary is two ports.
+    ///
+    /// Split once here rather than per request. The value is fixed for the
+    /// process, and splitting it on the request path put a branch in the hot
+    /// path that no input could reach.
+    pub(crate) notary_host: String,
     /// The CCDP Distribution this bridge selects, and the ONLY origin the
     /// token route admits.
     ///
@@ -93,6 +99,10 @@ pub struct AppState {
     /// same-origin application to admit, so the exception is closed for it.
     pub(crate) admits_same_origin_config: bool,
     /// The effective admission set: `allowedAppOrigins ∪ {ccdpOrigin}`.
+    ///
+    /// Read by the configuration route and inserted into the callback
+    /// document. The token route does NOT use it -- it admits `ccdpOrigin`
+    /// alone.
     ///
     /// One set, derived once, governing the configuration route, the token
     /// route and what the callback document is told -- the contract makes it

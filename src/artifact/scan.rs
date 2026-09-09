@@ -118,7 +118,8 @@ pub(crate) fn scan(html: &str) -> Result<Layout, ArtifactError> {
             // inline logo, so refusing SVG outright would refuse every real
             // artifact -- and it would do so late, after vendoring.
             at = after;
-        } else if rest.len() > 7 && rest[1..7].eq_ignore_ascii_case("script") {
+        } else if rest.len() > 7 && rest.as_bytes()[1..7].eq_ignore_ascii_case(b"script")
+        {
             // Any other script element: a `src`, a nonce, a classic script, an
             // attribute in another order. Each is a shape this bridge has not
             // reasoned about, and refusing costs a log line while guessing
@@ -205,7 +206,15 @@ fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactErr
     let rest = &html[open..];
     let name = ["svg", "math"]
         .into_iter()
-        .find(|n| rest.len() > n.len() + 1 && rest[1..=n.len()].eq_ignore_ascii_case(n));
+        // Compared as BYTES. `rest` is `&str`, and slicing it at a fixed byte
+        // index panics when that index lands inside a multi-byte character --
+        // `<p>é` puts one at 3, which `rest[1..4]` would split. The artifact is
+        // not this bridge's to author, so a localised one must be refused with
+        // an error naming the setting, never abort the process.
+        .find(|n| {
+            rest.len() > n.len() + 1
+                && rest.as_bytes()[1..=n.len()].eq_ignore_ascii_case(n.as_bytes())
+        });
     let Some(name) = name else { return Ok(None) };
 
     // One open tag, which may close itself.
@@ -334,6 +343,31 @@ fn end_of_tag(html: &str, open: usize, mut i: usize) -> Result<usize, ArtifactEr
 
 #[cfg(test)]
 mod tests {
+    /// A localised artifact must be REFUSED, not panic the process.
+    ///
+    /// Every one of these puts a multi-byte character at the byte index the
+    /// foreign-content and script checks read. Slicing `&str` there panics;
+    /// the bridge would abort at startup instead of naming the setting.
+    #[test]
+    fn a_multi_byte_character_after_a_short_tag_is_refused_not_a_panic() {
+        for html in [
+            "<p>\u{e9}",
+            "<b>\u{2014}",
+            "<em>\u{e9}",
+            "<h1>\u{e9}",
+            "<p>abc\u{e9}",
+        ] {
+            let doc = format!(
+                "<!doctype html><html><body>{html}<script \
+                 id=\"libid-callback-config\" \
+                 type=\"application/json\">{}</script></body></html>",
+                super::MARKER
+            );
+            // The contract is only that it returns rather than unwinds.
+            let _ = scan(&doc);
+        }
+    }
+
     use super::*;
 
     /// A document in the canonical shape, with one thing varied per test. The

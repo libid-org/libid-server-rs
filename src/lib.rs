@@ -63,9 +63,12 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
     // One effective set, derived after the CCDP origin is resolved:
-    // `allowedAppOrigins ∪ {ccdpOrigin}`. The contract makes configuration
-    // reads, the callback connection and the token route one admission rule,
-    // so this is built once and shared rather than re-derived per surface.
+    // `allowedAppOrigins ∪ {ccdpOrigin}`. It governs configuration reads and
+    // what the callback document is told, and is built once rather than
+    // re-derived per surface.
+    //
+    // NOT the token route. That one admits `ccdpOrigin` alone -- see
+    // `GithubExchange::ccdp_origin` for why the narrower rule.
     // Adding an already-listed origin does not duplicate it, and only the
     // RESOLVED origin joins -- a deployment that overrides `CCDP_ORIGIN` does
     // not keep `https://lib.id` admitted unless it lists it.
@@ -90,13 +93,19 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         cfg.gh_oauth_client_secret.as_str(),
     ) {
         (Some(profile), secret) if !secret.is_empty() => {
+            let addr = notary_addr(&cfg.notary_url)?;
             Some(Arc::new(state::GithubExchange {
                 credentials: oauth::OAuthCredentials {
                     client_id: profile.client_id.clone(),
                     client_secret: secret.to_owned(),
                     redirect_uri: redirect_uri.clone(),
                 },
-                notary_addr: notary_addr(&cfg.notary_url)?,
+                notary_addr: addr.clone(),
+                notary_host: addr
+                    .rsplit_once(':')
+                    .expect("notary_addr is built as host:port")
+                    .0
+                    .to_owned(),
                 ccdp_origin: ccdp_origin.clone(),
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
