@@ -141,18 +141,17 @@ fn callback_document(
             ccdp_origin,
             allowed_app_origins,
         },
-        artifact::Source::Embedded,
     )
     .map_err(|e| Error::Config {
         detail: format!("the compiled-in callback artifact is not serveable: {e}"),
     })?;
-    if document.source == artifact::Source::Embedded {
-        tracing::warn!(
-            "serving the COMPILED-IN callback artifact: it clears the OAuth return \
-             and renders fixed text, and completes no ceremony. Vendor a real \
-             artifact from the CCDP Distribution before running this deployment."
-        );
-    }
+    // Unconditional, because there is one source. When the bridge can fetch a
+    // newer artifact this becomes the branch that fires only for the floor.
+    tracing::warn!(
+        "serving the COMPILED-IN callback artifact: it clears the OAuth return \
+         and renders fixed text, and completes no ceremony. Vendor a real \
+         artifact from the CCDP Distribution before running this deployment."
+    );
     Ok(document)
 }
 
@@ -260,7 +259,7 @@ fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     let origin = url.origin().ascii_serialization();
     if !origin
         .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"-.:[]/".contains(&b))
+        .all(|b| b.is_ascii_alphanumeric() || b"-_.:[]/".contains(&b))
     {
         return Err(refuse(
             "carries a byte an origin is not made of, which a \
@@ -348,9 +347,15 @@ fn notary_addr(url: &Url) -> Result<String> {
     let host = url.host_str().ok_or_else(|| Error::NotaryUrl {
         detail: format!("{url} names no host"),
     })?;
-    let port = url.port().ok_or_else(|| Error::NotaryUrl {
-        detail: format!("{url} names no port"),
-    })?;
+    // `port_or_known_default`, not `port`: `Url` drops a port that is its
+    // scheme's default during normalisation, so `https://notary.example:443`
+    // would otherwise be refused for naming no port while plainly naming one.
+    // `tcp://` has no known default, which is the case the message describes.
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| Error::NotaryUrl {
+            detail: format!("{url} names no port, and its scheme implies none"),
+        })?;
     Ok(format!("{host}:{port}"))
 }
 
@@ -364,7 +369,18 @@ mod tests {
     /// twice -- so a test that means "this one value differs" must not also
     /// leave the default behind.
     fn config(args: &[&str]) -> config::Config {
+        // EVERY flag that reads an environment variable is listed, including
+        // ones no assertion cares about. clap falls back to the process
+        // environment for any flag an argv does not carry, so an omitted one
+        // is the developer's shell reaching into the fixture -- `CALLBACK_PATH`
+        // exported for a local run makes the router mount somewhere else and
+        // every callback assertion fails with a 404 that names no cause.
         let mut flags: Vec<(&str, &str)> = vec![
+            ("--host", "127.0.0.1"),
+            ("--port", "8722"),
+            ("--base-url", "http://127.0.0.1:8722"),
+            ("--notary-url", "tcp://127.0.0.1:7047"),
+            ("--callback-path", "/auth/callback"),
             ("--allowed-app-origins", "https://app.example"),
             ("--ccdp-origin", "https://ccdp.example"),
             (
@@ -403,27 +419,25 @@ mod tests {
         );
     }
 
-    /// An omitted CCDP origin selects the canonical libID Distribution, which
-    /// the contract names. Built without the flag at all rather than with it
-    /// set to that value, so the assertion is about the default and not about
-    /// a string typed twice.
+    /// An omitted CCDP origin selects the canonical libID Distribution.
+    ///
+    /// Asserted in two halves, and deliberately not by parsing an argv without
+    /// the flag: clap prefers an environment variable over a declared default,
+    /// so that spelling would pass or fail depending on whether the developer
+    /// running it happens to export `CCDP_ORIGIN`.
     #[test]
     fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
-        let cfg = <config::Config as clap::Parser>::parse_from([
-            "libid-server-rs",
-            "--base-url",
-            "https://id.example",
-            "--allowed-app-origins",
-            "https://app.example",
-            "--ceremony-platforms",
-            r#"[{"id":"github","clientId":"Iv1.x","versions":[1]}]"#,
-            "--gh-oauth-client-secret",
-            "ghs_secret",
-        ]);
-        assert_eq!(cfg.ccdp_origin, "https://lib.id");
+        // What the deployment contract declares, read off the command itself.
+        let command = <config::Config as clap::CommandFactory>::command();
+        let arg = command
+            .get_arguments()
+            .find(|a| a.get_id() == "ccdp_origin")
+            .expect("the ccdp origin is an argument");
+        assert_eq!(arg.get_default_values(), ["https://lib.id"]);
 
-        // And it reaches the record an application reads, not just the config.
-        let state = build_state(&cfg).unwrap();
+        // And that whatever it is reaches the record an application reads --
+        // the plumbing, which is the half a default alone would not prove.
+        let state = build_state(&config(&["--ccdp-origin", "https://lib.id"])).unwrap();
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(record["ccdpOrigin"], "https://lib.id");
@@ -483,6 +497,41 @@ mod tests {
         ] {
             assert!(canonical_origin("T", spelling).is_err(), "{spelling}");
         }
+    }
+
+    /// An underscore is legal in a host, is a byte a browser sends unchanged,
+    /// and is not Content-Security-Policy syntax -- so the byte filter that
+    /// exists to keep CSP delimiters out must not take it with them.
+    #[test]
+    fn an_underscore_in_a_host_is_an_origin_like_any_other() {
+        for spelling in [
+            "https://dev_box.example",
+            "https://app_staging.example:8443",
+        ] {
+            assert!(canonical_origin("T", spelling).is_ok(), "{spelling}");
+        }
+        // And the bytes it exists for are still refused.
+        for hostile in ["https://a;b.example", "https://a'b.example"] {
+            assert!(canonical_origin("T", hostile).is_err(), "{hostile}");
+        }
+    }
+
+    /// `Url` drops a port that is its scheme's default, so reading `port()`
+    /// alone refuses `https://notary.example:443` for naming no port while it
+    /// plainly names one.
+    #[test]
+    fn a_notary_url_whose_port_is_its_schemes_default_is_accepted() {
+        for (url, expected) in [
+            ("https://notary.example", "notary.example:443"),
+            ("https://notary.example:443", "notary.example:443"),
+            ("http://notary.example", "notary.example:80"),
+            ("tcp://127.0.0.1:7047", "127.0.0.1:7047"),
+        ] {
+            let parsed = Url::parse(url).unwrap();
+            assert_eq!(notary_addr(&parsed).unwrap(), expected, "{url}");
+        }
+        // `tcp` has no known default, which is the case the message describes.
+        assert!(notary_addr(&Url::parse("tcp://notary.example").unwrap()).is_err());
     }
 
     /// Anything a browser never sends as `Origin` is refused at startup. Left

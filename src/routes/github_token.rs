@@ -309,13 +309,14 @@ pub(crate) async fn github_token(
     // it is also exactly this one: the caller here is the Prover on the
     // distribution, not the application, so `allowedAppOrigins` grants nothing.
     //
-    // `get_all`, not `get`: the contract refuses a request carrying MULTIPLE
-    // `Origin` headers, and taking the first would let a caller pick which one
-    // is read. Missing, `null` and malformed all fall through the same way.
-    let mut origins = headers.get_all(header::ORIGIN).iter();
+    // Exactly one, and exactly the configured origin. Missing, `null`,
+    // malformed and repeated all fail here, which is what the contract asks
+    // for -- and the counting is shared with the configuration route so the
+    // two cannot drift.
     let admitted = matches!(
-        (origins.next(), origins.next()),
-        (Some(origin), None) if origin.as_bytes() == github.ccdp_origin.as_bytes()
+        crate::routes::origins(&headers),
+        crate::routes::Origins::One(origin)
+            if origin.as_bytes() == github.ccdp_origin.as_bytes()
     );
     if !admitted {
         return Err(TokenError {
@@ -333,12 +334,19 @@ pub(crate) async fn github_token(
 
     // "Exactly `application/json`" -- axum's extractor also accepts any
     // `application/*+json`, which is a wider door than the contract opens.
+    // Case-insensitively: RFC 9110 makes the type and subtype case-insensitive,
+    // so `Application/JSON` is the media type the contract names, spelled by a
+    // caller that is entitled to spell it that way.
+    //
+    // `split(';').next()` cannot be `None` -- `str::split` always yields at
+    // least one item -- so the absent case is the ABSENT HEADER below, and only
+    // that.
     let media_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(';').next().unwrap_or_default().trim().to_owned())
+        .map(|v| v.split(';').next().unwrap_or(v).trim())
         .unwrap_or_default();
-    if media_type != "application/json" {
+    if !media_type.eq_ignore_ascii_case("application/json") {
         return Err(TokenError {
             status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
             message: "this route takes exactly application/json".into(),
@@ -377,9 +385,16 @@ pub(crate) async fn github_token(
         code: body.code,
         code_verifier: body.code_verifier,
     };
-    request
-        .validate()
-        .map_err(|e| TokenError::bad_request(e.to_string()))?;
+    // The reason is LOGGED, not returned. `TokenExchangeError`'s `Display`
+    // carries byte offsets derived from what the caller sent, and this route's
+    // contract says a failure returns no caller-selected diagnostic content --
+    // the same rule that already governs the JSON rejection above. It also
+    // belongs to a crate this service does not own, so a change there would
+    // otherwise widen what this route says with nothing here to notice.
+    request.validate().map_err(|cause| {
+        tracing::debug!(%cause, "refused a token request that does not validate");
+        TokenError::bad_request("the request body is not a TokenRequest")
+    })?;
 
     // One permit, one session. Shed rather than queue: a caller told to come
     // back is better served than one held behind a queue it cannot see, and an
@@ -587,44 +602,85 @@ fn select_layouts(sent: &[u8], recv: &[u8]) -> Result<Selection, ceremony::Layou
 /// valid. The one refusal in its catalogue that the caller can act on.
 const BAD_CODE: &[u8] = b"bad_verification_code";
 
-/// GitHub answering the exchange with an error object rather than a bearer.
+/// The field GitHub names a refusal in. Its presence says the platform decided
+/// something; its absence says the response was not a refusal at all.
+const ERROR_FIELD: &[u8] = b"\"error\":\"";
+
+/// What the platform actually answered, as far as this service can tell from
+/// the received transcript.
+///
+/// Three outcomes, because there are three, and answering them alike is how an
+/// operator ends up paged for a spent code or a user ends up told to retry
+/// something that cannot succeed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlatformAnswer {
+    /// `bad_verification_code`: spent, replayed, or never valid.
+    RefusedTheCode,
+    /// Some other named error -- `incorrect_client_credentials`,
+    /// `redirect_uri_mismatch`. This deployment is broken for everybody.
+    RefusedThisDeployment,
+    /// No named error, and no bearer either: a `200` this service cannot use.
+    /// Neither party can fix it by trying again.
+    Unusable,
+}
+
+/// Read that answer off the transcript, where it exists and nowhere else.
+///
+/// The whole reading survives as one enum value. Nothing the platform wrote
+/// travels further: what reaches a log or a caller is this service's own words.
+fn classify(recv: &[u8]) -> PlatformAnswer {
+    let holds = |needle: &[u8]| recv.windows(needle.len()).any(|w| w == needle);
+    if holds(BAD_CODE) {
+        PlatformAnswer::RefusedTheCode
+    } else if holds(ERROR_FIELD) {
+        PlatformAnswer::RefusedThisDeployment
+    } else {
+        PlatformAnswer::Unusable
+    }
+}
+
+/// GitHub answering the exchange with something other than a bearer.
 ///
 /// The session ran and the response arrived carrying no `access_token` for the
 /// layout to anchor on. WHOSE fault that is decides the answer, and GitHub
-/// returns `200` for every one of them, so the status cannot decide it.
+/// returns `200` for every one of them, so the status cannot decide it -- the
+/// error code can, and [`classify`] reads it.
 ///
 /// `bad_verification_code` is the caller's: a double-clicked button, a reloaded
-/// callback, a stale link. Every other code in that catalogue --
+/// callback, a stale link. Every other named code --
 /// `incorrect_client_credentials`, `redirect_uri_mismatch` -- is this
-/// deployment, broken for everybody until a setting changes. Answering those
-/// as the caller's would tell every user to retry something that cannot
-/// succeed, and leave nothing above `warn` in the log while it happened.
+/// deployment, broken for everybody until a setting changes. Answering those as
+/// the caller's would tell every user to retry something that cannot succeed,
+/// and leave nothing above `warn` in the log while it happened.
 ///
-/// The unrecognised case is treated as the deployment's. A caller told to come
-/// back later when the code was merely spent costs one retry; an operator not
-/// told their credentials are rejected costs the whole deployment.
+/// And a `200` naming NO error while carrying no bearer is neither. It is a
+/// response this service cannot use, and calling it a bad code would page an
+/// operator over credentials that are fine while telling a user to retry.
 fn platform_refusal(
     refusal: Option<&ceremony::LayoutError>,
-    names_bad_code: bool,
+    answer: PlatformAnswer,
 ) -> Option<Error> {
     if !matches!(refusal, Some(ceremony::LayoutError::MissingField(f)) if f == "access_token")
     {
         return None;
     }
-    Some(if names_bad_code {
-        Error::OAuthFailed {
+    Some(match answer {
+        PlatformAnswer::RefusedTheCode => Error::OAuthFailed {
             platform: "github".into(),
             detail: "the token endpoint returned no access_token".into(),
-        }
-    } else {
-        Error::PlatformMisconfigured {
+        },
+        PlatformAnswer::RefusedThisDeployment => Error::PlatformMisconfigured {
             platform: "github".into(),
             detail: "the token endpoint refused with an error that is not a bad \
                      verification code; check GH_OAUTH_CLIENT_SECRET and that the \
                      registered callback URL is exactly this deployment's redirect \
                      URI"
             .into(),
-        }
+        },
+        PlatformAnswer::Unusable => Error::MpcTlsFailed {
+            detail: "the token endpoint answered with neither a bearer nor an error"
+                .into(),
+        },
     })
 }
 
@@ -663,8 +719,8 @@ async fn exchange(
     let mut refusal: Option<ceremony::LayoutError> = None;
     // Whose refusal it was, decided here because this is the only place the
     // received transcript exists. Read, never kept: what survives the closure
-    // is one bit, and this service's own words are what get logged.
-    let mut names_bad_code = false;
+    // is one enum value, and this service's own words are what get logged.
+    let mut answer = PlatformAnswer::Unusable;
 
     // The layouts state what this session discloses, and each direction's
     // commitments are the complement of its reveals — so the transcript tiles
@@ -686,7 +742,7 @@ async fn exchange(
                     Ok((sent, recv))
                 }
                 Err(e) => {
-                    names_bad_code = recv.windows(BAD_CODE.len()).any(|w| w == BAD_CODE);
+                    answer = classify(recv);
                     let failed = layout_failed(&e);
                     refusal = Some(e);
                     Err(failed)
@@ -703,8 +759,9 @@ async fn exchange(
     let mut result = match session {
         Ok(result) => result,
         Err(e) => {
-            return Err(platform_refusal(refusal.as_ref(), names_bad_code)
-                .unwrap_or_else(|| e.into()))
+            return Err(
+                platform_refusal(refusal.as_ref(), answer).unwrap_or_else(|| e.into())
+            )
         }
     };
 
@@ -948,7 +1005,8 @@ mod tests {
     fn a_refused_code_and_a_broken_deployment_are_not_the_same_answer() {
         let refused = ceremony::LayoutError::MissingField("access_token".into());
 
-        let callers = platform_refusal(Some(&refused), true).unwrap();
+        let callers =
+            platform_refusal(Some(&refused), PlatformAnswer::RefusedTheCode).unwrap();
         assert!(matches!(callers, Error::OAuthFailed { .. }));
         assert_eq!(
             TokenError::from_exchange(callers).status,
@@ -956,7 +1014,9 @@ mod tests {
             "a spent code is the caller's to fix"
         );
 
-        let ours = platform_refusal(Some(&refused), false).unwrap();
+        let ours =
+            platform_refusal(Some(&refused), PlatformAnswer::RefusedThisDeployment)
+                .unwrap();
         assert!(matches!(ours, Error::PlatformMisconfigured { .. }));
         assert_eq!(
             TokenError::from_exchange(ours).status,
@@ -966,7 +1026,7 @@ mod tests {
 
         // And nothing this service writes about it quotes the platform.
         let Some(Error::PlatformMisconfigured { detail, .. }) =
-            platform_refusal(Some(&refused), false)
+            platform_refusal(Some(&refused), PlatformAnswer::RefusedThisDeployment)
         else {
             panic!("a deployment fault")
         };
@@ -1002,11 +1062,12 @@ mod tests {
             Some(&ceremony::LayoutError::NoHeadBoundary),
             None,
         ] {
-            for names_bad_code in [true, false] {
-                assert!(
-                    platform_refusal(other, names_bad_code).is_none(),
-                    "{other:?}"
-                );
+            for answer in [
+                PlatformAnswer::RefusedTheCode,
+                PlatformAnswer::RefusedThisDeployment,
+                PlatformAnswer::Unusable,
+            ] {
+                assert!(platform_refusal(other, answer).is_none(), "{other:?}");
             }
         }
         assert_eq!(
@@ -1178,13 +1239,63 @@ mod tests {
             matches!(&refusal, ceremony::LayoutError::MissingField(f) if f == "access_token"),
             "got {refusal:?}"
         );
-        // And that is the one refusal the caller is told to act on.
-        let told = platform_refusal(Some(&refusal), true).expect("a platform refusal");
-        assert!(matches!(told, Error::OAuthFailed { .. }));
+        // Classified from the SAME bytes production classifies, not from a
+        // value the test chose. That distinction is the whole point: this
+        // response names no error at all, so it is neither a spent code nor
+        // wrong credentials -- and answering it as either would tell a user to
+        // retry what cannot succeed, or page an operator over a secret that is
+        // fine.
+        let answer = classify(recv);
+        assert_eq!(answer, PlatformAnswer::Unusable);
+        let told = platform_refusal(Some(&refusal), answer).expect("a platform refusal");
+        assert!(matches!(told, Error::MpcTlsFailed { .. }));
         assert_eq!(
             TokenError::from_exchange(told).status,
-            StatusCode::BAD_REQUEST
+            StatusCode::BAD_GATEWAY
         );
+    }
+
+    /// The three answers a `200` can carry, read off the transcript the way the
+    /// session reads it.
+    #[test]
+    fn the_platform_answer_is_read_from_the_response_the_session_saw() {
+        let body = |json: &str| {
+            format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{json}")
+                .into_bytes()
+        };
+        for (json, expected) in [
+            (
+                r#"{"error":"bad_verification_code"}"#,
+                PlatformAnswer::RefusedTheCode,
+            ),
+            (
+                r#"{"error":"incorrect_client_credentials"}"#,
+                PlatformAnswer::RefusedThisDeployment,
+            ),
+            (
+                r#"{"error":"redirect_uri_mismatch"}"#,
+                PlatformAnswer::RefusedThisDeployment,
+            ),
+            (r#"{"access_token":""}"#, PlatformAnswer::Unusable),
+            (r#"{}"#, PlatformAnswer::Unusable),
+        ] {
+            assert_eq!(classify(&body(json)), expected, "{json}");
+        }
+
+        // And each maps to a different answer, which is why they are told
+        // apart at all.
+        let refused = ceremony::LayoutError::MissingField("access_token".into());
+        for (answer, status) in [
+            (PlatformAnswer::RefusedTheCode, StatusCode::BAD_REQUEST),
+            (
+                PlatformAnswer::RefusedThisDeployment,
+                StatusCode::BAD_GATEWAY,
+            ),
+            (PlatformAnswer::Unusable, StatusCode::BAD_GATEWAY),
+        ] {
+            let told = platform_refusal(Some(&refused), answer).expect("a refusal");
+            assert_eq!(TokenError::from_exchange(told).status, status, "{answer:?}");
+        }
     }
 
     /// A response carrying no `access_token` anchor at all is the same
@@ -1204,7 +1315,7 @@ mod tests {
         let Err(refusal) = select_layouts(&sent, recv) else {
             panic!("a response with no bearer must not produce a selection")
         };
-        let told = platform_refusal(Some(&refusal), true).expect("a platform refusal");
+        let told = platform_refusal(Some(&refusal), classify(recv)).expect("a refusal");
         assert_eq!(
             TokenError::from_exchange(told).status,
             StatusCode::BAD_REQUEST,
@@ -1219,11 +1330,11 @@ mod tests {
             ceremony::LayoutError::MissingHeader("host"),
         ] {
             assert!(
-                platform_refusal(Some(&other), true).is_none(),
+                platform_refusal(Some(&other), PlatformAnswer::RefusedTheCode).is_none(),
                 "{other} is not the caller's to fix"
             );
         }
-        assert!(platform_refusal(None, true).is_none());
+        assert!(platform_refusal(None, PlatformAnswer::RefusedTheCode).is_none());
         assert_eq!(
             TokenError::upstream("anything at all").status,
             StatusCode::BAD_GATEWAY

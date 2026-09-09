@@ -40,7 +40,16 @@ const REDIRECT_URI: &str = "http://127.0.0.1:8722/auth/callback";
 /// refuse, which is the only reason `build_router` may take an `AppState` and
 /// route a configured path without being able to fail.
 fn deployment(overrides: &[&str]) -> Arc<AppState> {
+    // EVERY flag that reads an environment variable is listed, including
+    // ones no assertion cares about. clap falls back to the process
+    // environment for any flag an argv does not carry, so an omitted one
+    // is the developer's shell reaching into the fixture -- `CALLBACK_PATH`
+    // exported for a local run makes the router mount somewhere else and
+    // every callback assertion fails with a 404 that names no cause.
     let mut flags: Vec<(&str, &str)> = vec![
+        ("--host", "127.0.0.1"),
+        ("--port", "8722"),
+        ("--callback-path", "/auth/callback"),
         ("--base-url", "http://127.0.0.1:8722"),
         (
             "--allowed-app-origins",

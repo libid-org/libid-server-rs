@@ -113,7 +113,12 @@ pub(crate) fn scan(html: &str) -> Result<Layout, ArtifactError> {
             let end = close_of(html, text)?;
             executables.push(text..end);
             at = end + SCRIPT_CLOSE.len();
-        } else if rest[1..].to_ascii_lowercase().starts_with("script") {
+        } else if let Some(after) = foreign_subtree(html, open)? {
+            // Foreign content. The artifact is documented as carrying an
+            // inline logo, so refusing SVG outright would refuse every real
+            // artifact -- and it would do so late, after vendoring.
+            at = after;
+        } else if rest.len() > 7 && rest[1..7].eq_ignore_ascii_case("script") {
             // Any other script element: a `src`, a nonce, a classic script, an
             // attribute in another order. Each is a shape this bridge has not
             // reasoned about, and refusing costs a log line while guessing
@@ -164,13 +169,17 @@ fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
     // HASH CORRECTNESS. In foreign content `<script>` is parsed as markup
     // rather than raw text. Rather than track insertion modes, refuse the
     // elements that open one.
+    // Lowercased ONCE. Inside the loop this allocated a copy of the whole
+    // document per needle, and `compose` scans twice.
+    // `<svg` and `<math` are NOT here: the artifact carries an inline logo, so
+    // they are stepped over by `foreign_subtree` and refused only if one holds
+    // a `<script`.
+    let lower = html.to_ascii_lowercase();
     for (needle, what) in [
-        ("<svg", "inline SVG"),
-        ("<math", "inline MathML"),
         ("<![cdata[", "a CDATA section"),
         ("<?", "a processing instruction"),
     ] {
-        if let Some(i) = html.to_ascii_lowercase().find(needle) {
+        if let Some(i) = lower.find(needle) {
             return Err(ArtifactError::Forbidden(what, i));
         }
     }
@@ -182,6 +191,57 @@ fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
         return Err(ArtifactError::Forbidden("a control byte", i));
     }
     Ok(())
+}
+
+/// Skip an `<svg>` or `<math>` subtree, or return `None` if this tag opens
+/// neither.
+///
+/// HASH CORRECTNESS. Inside foreign content `<script>` is parsed as markup
+/// rather than raw text, so the "first `</script>` terminates" rule this reader
+/// depends on does not hold there. Rather than track insertion modes, the
+/// subtree is stepped over whole and refused if it contains a `<script` at all
+/// -- which an inline logo has no reason to.
+fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactError> {
+    let rest = &html[open..];
+    let name = ["svg", "math"]
+        .into_iter()
+        .find(|n| rest.len() > n.len() + 1 && rest[1..=n.len()].eq_ignore_ascii_case(n));
+    let Some(name) = name else { return Ok(None) };
+
+    // One open tag, which may close itself.
+    let tag_end = end_of_tag(html, open, open + 1 + name.len())?;
+    if html[open..tag_end].ends_with("/>") {
+        return Ok(Some(tag_end));
+    }
+
+    // Otherwise walk to the matching close, counting nesting.
+    let lower = html[tag_end..].to_ascii_lowercase();
+    let (o, c) = (format!("<{name}"), format!("</{name}"));
+    let (mut depth, mut i) = (1usize, 0usize);
+    while depth > 0 {
+        let next_open = lower[i..].find(&o).map(|k| i + k);
+        let Some(next_close) = lower[i..].find(&c).map(|k| i + k) else {
+            return Err(ArtifactError::Malformed(open));
+        };
+        match next_open {
+            Some(n) if n < next_close => {
+                depth += 1;
+                i = n + o.len();
+            }
+            _ => {
+                depth -= 1;
+                i = next_close + c.len();
+            }
+        }
+    }
+    let end = end_of_tag(html, open, tag_end + i)?;
+    if lower[..i].contains("<script") {
+        return Err(ArtifactError::Forbidden(
+            "a script inside foreign content",
+            open,
+        ));
+    }
+    Ok(Some(end))
 }
 
 /// The end of a script element's text, requiring the exact terminator.
@@ -324,8 +384,7 @@ mod tests {
             scan(&module("<!-- x -->")),
             Err(ArtifactError::Forbidden("an HTML comment", _))
         ));
-        // In foreign content `<script>` is markup, not raw text.
-        for hostile in ["<svg></svg>", "<math></math>", "<![CDATA[x]]>", "<?x?>"] {
+        for hostile in ["<![CDATA[x]]>", "<?x?>"] {
             assert!(
                 matches!(scan(&doc(hostile)), Err(ArtifactError::Forbidden(..))),
                 "accepted {hostile}"
@@ -339,6 +398,46 @@ mod tests {
 
     /// Every script shape but the two this bridge reads. Each would otherwise
     /// be hashed wrongly, or not hashed at all.
+    /// The artifact is documented as carrying an inline logo, so foreign
+    /// content is stepped over rather than refused -- but a `<script>` inside
+    /// it is parsed as markup rather than raw text, and this reader would then
+    /// measure a different span than the browser executes.
+    #[test]
+    fn foreign_content_is_stepped_over_and_a_script_inside_one_is_not() {
+        for logo in [
+            "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0\"></path></svg>",
+            "<svg><svg></svg></svg>",
+            "<svg/>",
+            "<math><mi>x</mi></math>",
+            "<SVG></SVG>",
+        ] {
+            let html = doc(&format!(
+                "{logo}<script type=\"module\">let x = 1;</script>"
+            ));
+            let layout = scan(&html).unwrap_or_else(|e| panic!("refused {logo}: {e}"));
+            assert_eq!(&html[layout.executables[0].clone()], "let x = 1;");
+        }
+
+        for hostile in [
+            "<svg><script>x</script></svg>",
+            "<math><script type=\"module\">x</script></math>",
+        ] {
+            let html = doc(&format!(
+                "{hostile}<script type=\"module\">let x = 1;</script>"
+            ));
+            assert!(
+                matches!(
+                    scan(&html),
+                    Err(ArtifactError::Forbidden(
+                        "a script inside foreign content",
+                        _
+                    ))
+                ),
+                "accepted {hostile}"
+            );
+        }
+    }
+
     #[test]
     fn a_script_this_reader_does_not_understand_is_refused() {
         for hostile in [

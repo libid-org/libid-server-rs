@@ -70,18 +70,15 @@ enum Admitted {
 fn admit(state: &AppState, headers: &HeaderMap) -> Option<Admitted> {
     let admitted = |o: &str| state.allowed_app_origins.iter().any(|a| a == o);
 
-    // `get_all`, not `get`: two `Origin` headers is not a request a browser
-    // sends, and taking the first would let one be chosen for us.
-    let mut origins = headers.get_all(header::ORIGIN).iter();
-    match (origins.next(), origins.next()) {
-        (Some(origin), None) => {
-            // Present and exact, or refused. `null`, a malformed value and an
-            // unlisted one all land here and all fail.
+    match crate::routes::origins(headers) {
+        // Present and exact, or refused. `null`, a malformed value and an
+        // unlisted one all land here and all fail.
+        crate::routes::Origins::One(origin) => {
             origin.to_str().ok().filter(|o| admitted(o))?;
             return Some(Admitted::Origin(origin.clone()));
         }
-        (Some(_), Some(_)) => return None,
-        (None, _) => {}
+        crate::routes::Origins::Several => return None,
+        crate::routes::Origins::Absent => {}
     }
 
     // No `Origin` at all. A top-level navigation and a same-origin fetch both

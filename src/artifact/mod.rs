@@ -55,17 +55,6 @@ pub(crate) struct DeploymentInputs<'a> {
     pub(crate) allowed_app_origins: &'a [String],
 }
 
-/// Where an artifact came from.
-///
-/// Stated by the caller, never inferred. A `const` is inlined at each use, so
-/// two references to [`EMBEDDED`] need not share an address and a pointer
-/// comparison would answer whatever the optimiser felt like.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Source {
-    /// The artifact compiled into this binary.
-    Embedded,
-}
-
 /// The finished document: the exact bytes, and the policy they are served
 /// under.
 pub(crate) struct CallbackDocument {
@@ -76,8 +65,6 @@ pub(crate) struct CallbackDocument {
     /// actually carries. Parsed into a header value here, so no request pays
     /// for -- or can fail -- that parse.
     pub(crate) csp: HeaderValue,
-    /// Where these bytes came from.
-    pub(crate) source: Source,
 }
 
 /// Configure one artifact and compose the response it is served as.
@@ -89,7 +76,6 @@ pub(crate) struct CallbackDocument {
 pub(crate) fn compose(
     html: &str,
     inputs: &DeploymentInputs<'_>,
-    source: Source,
 ) -> Result<CallbackDocument, ArtifactError> {
     let layout = scan(html)?;
     // The marker rule, which belongs to insertion rather than to reading a
@@ -138,7 +124,6 @@ pub(crate) fn compose(
     Ok(CallbackDocument {
         body: Bytes::from(body),
         csp,
-        source,
     })
 }
 
@@ -188,17 +173,21 @@ fn hash_source(script: &str) -> String {
 /// with them, which makes the inserted data ASCII and its encoding moot. The
 /// contract asks only for `<`; this is a superset and stays one.
 fn json(value: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+
     let mut out = String::new();
     for c in value.to_string().chars() {
         match c {
+            // `write!` into the buffer rather than `push_str(&format!(..))`,
+            // which allocated a `String` per escaped character.
             '<' | '>' | '&' | '\u{2028}' | '\u{2029}' => {
-                out.push_str(&format!("\\u{:04x}", c as u32))
+                let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c if c.is_ascii() => out.push(c),
             c => {
                 let mut buf = [0u16; 2];
                 for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
+                    let _ = write!(out, "\\u{unit:04x}");
                 }
             }
         }
@@ -221,7 +210,6 @@ mod tests {
                 ccdp_origin: "https://ccdp.example",
                 allowed_app_origins: origins,
             },
-            Source::Embedded,
         )
         .expect("composes")
     }
@@ -236,7 +224,6 @@ mod tests {
     #[test]
     fn the_compiled_in_artifact_composes() {
         let doc = composed(EMBEDDED, &origins());
-        assert_eq!(doc.source, Source::Embedded);
         assert!(text(&doc).contains("https://app.example"));
     }
 
@@ -341,7 +328,6 @@ mod tests {
                     ccdp_origin: "https://ccdp.example",
                     allowed_app_origins: &origins(),
                 },
-                Source::Embedded
             ),
             Err(scan::ArtifactError::Marker)
         ));
@@ -360,7 +346,6 @@ mod tests {
                     ccdp_origin: "https://ccdp.example",
                     allowed_app_origins: &origins(),
                 },
-                Source::Embedded
             ),
             Err(scan::ArtifactError::Marker)
         ));

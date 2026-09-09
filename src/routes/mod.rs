@@ -42,6 +42,34 @@ use tower_http::cors::{
 
 use crate::state::AppState;
 
+/// How many `Origin` headers a request carried, which both gated routes have
+/// to distinguish three ways.
+///
+/// One spelling, because it is one security rule. It was written twice --
+/// `to_str().ok().filter(..)` on the configuration route and a raw byte
+/// comparison on the token route -- and two spellings of one rule drift the
+/// first time either is tightened.
+pub(crate) enum Origins<'a> {
+    /// No `Origin` at all. A top-level navigation looks like this, and so does
+    /// a same-origin fetch, so only Fetch metadata can tell them apart.
+    Absent,
+    /// Exactly one, which is the only case that can be admitted on its value.
+    One(&'a axum::http::HeaderValue),
+    /// More than one. Not a request a browser sends, and reading the first
+    /// would let the caller choose which one is read.
+    Several,
+}
+
+/// Read them.
+pub(crate) fn origins(headers: &axum::http::HeaderMap) -> Origins<'_> {
+    let mut seen = headers.get_all(axum::http::header::ORIGIN).iter();
+    match (seen.next(), seen.next()) {
+        (Some(one), None) => Origins::One(one),
+        (Some(_), Some(_)) => Origins::Several,
+        (None, _) => Origins::Absent,
+    }
+}
+
 /// Liveness probe, and the one route the OAuth Bridge contract does not list.
 ///
 /// The contract's route surface is closed -- "the bridge exposes only" three
