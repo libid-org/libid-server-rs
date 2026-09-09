@@ -140,39 +140,54 @@ pub fn platforms(json: &str) -> Result<Vec<PlatformProfile>> {
 /// platform and a version and never an artifact. The CCDP origin travels too:
 /// it is where the application sends the popup, and the one origin whose
 /// Callback artifact this bridge serves.
-fn record(redirect_uri: &str, ccdp_origin: &str, platforms: &[PlatformProfile]) -> Value {
-    let mut by_id = Map::new();
-    for p in platforms {
-        by_id.insert(
-            p.id.as_str().to_owned(),
-            json!({
-                "clientId": p.client_id,
-                "ceremonyVersions": p.versions,
-            }),
-        );
-    }
-    json!({
-        "redirectUri": redirect_uri,
-        "ccdpOrigin": ccdp_origin,
-        "platforms": Value::Object(by_id),
-    })
+/// What one deployment publishes, held together rather than passed apart.
+///
+/// Three readings of one deployment that every caller previously kept in step
+/// by hand, and the reason they are a struct is the same reason the record is:
+/// the projection is of a deployment, so a value that is not part of one has
+/// no field to arrive in.
+pub struct CeremonyConfig<'a> {
+    /// Where providers redirect back to, which the browser must match.
+    pub redirect_uri: &'a str,
+    /// The CCDP Distribution this deployment selects.
+    pub ccdp_origin: &'a str,
+    /// The enabled platforms, already parsed and checked.
+    pub platforms: &'a [PlatformProfile],
 }
 
-/// That record as the bytes it is served in, serialized once at startup.
-///
-/// Total, and not a `Result`. Serializing a `serde_json::Value` into a `Vec`
-/// fails only on a map key that is not a string or a writer that errors, and
-/// this has neither: the keys are `String` and the writer is memory. A
-/// `Result` here would be an error branch no input can reach.
-pub fn config_record(
-    redirect_uri: &str,
-    ccdp_origin: &str,
-    platforms: &[PlatformProfile],
-) -> Bytes {
-    Bytes::from(
-        serde_json::to_vec(&record(redirect_uri, ccdp_origin, platforms))
-            .expect("a Value of string keys serializes into memory"),
-    )
+impl CeremonyConfig<'_> {
+    fn record(&self) -> Value {
+        let (redirect_uri, ccdp_origin, platforms) =
+            (self.redirect_uri, self.ccdp_origin, self.platforms);
+        let mut by_id = Map::new();
+        for p in platforms {
+            by_id.insert(
+                p.id.as_str().to_owned(),
+                json!({
+                    "clientId": p.client_id,
+                    "ceremonyVersions": p.versions,
+                }),
+            );
+        }
+        json!({
+            "redirectUri": redirect_uri,
+            "ccdpOrigin": ccdp_origin,
+            "platforms": Value::Object(by_id),
+        })
+    }
+
+    /// That record as the bytes it is served in, serialized once at startup.
+    ///
+    /// Total, and not a `Result`. Serializing a `serde_json::Value` into a `Vec`
+    /// fails only on a map key that is not a string or a writer that errors, and
+    /// this has neither: the keys are `String` and the writer is memory. A
+    /// `Result` here would be an error branch no input can reach.
+    pub fn serialized(&self) -> Bytes {
+        Bytes::from(
+            serde_json::to_vec(&self.record())
+                .expect("a Value of string keys serializes into memory"),
+        )
+    }
 }
 
 #[cfg(test)]

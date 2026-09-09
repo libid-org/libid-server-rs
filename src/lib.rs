@@ -128,12 +128,17 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     };
 
     Ok(Arc::new(AppState {
-        ceremony_config: deployment::config_record(
-            &redirect_uri,
+        ceremony_config: deployment::CeremonyConfig {
+            redirect_uri: &redirect_uri,
+            ccdp_origin: &ccdp_origin,
+            platforms: &platforms,
+        }
+        .serialized(),
+        callback: artifact::CallbackDocument::for_deployment(
+            cfg,
             &ccdp_origin,
-            &platforms,
-        ),
-        callback: callback_document(cfg, &ccdp_origin, &allowed_origins)?,
+            &allowed_origins,
+        )?,
         admits_same_origin_config: allowed_origins.iter().any(|o| o == &server_origin),
         allowed_origins,
         callback_path,
@@ -154,54 +159,58 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 /// reaching the network and no request can arrive at a route with nothing to
 /// answer -- which is why the contract's "inert unavailable response" has no
 /// representation here.
-fn callback_document(
-    cfg: &config::Config,
-    ccdp_origin: &str,
-    allowed_origins: &[String],
-) -> Result<artifact::CallbackDocument> {
-    let path = cfg.callback_artifact_path.trim();
-    let (html, source) = if path.is_empty() {
-        (artifact::EMBEDDED.to_owned(), artifact::Source::Embedded)
-    } else {
-        let read = std::fs::read_to_string(path).map_err(|e| Error::Config {
-            detail: format!("CALLBACK_ARTIFACT_PATH {path}: {e}"),
+impl artifact::CallbackDocument {
+    /// The document this deployment serves: the configured artifact if one is
+    /// named, and the compiled-in floor otherwise.
+    fn for_deployment(
+        cfg: &config::Config,
+        ccdp_origin: &str,
+        allowed_origins: &[String],
+    ) -> Result<Self> {
+        let path = cfg.callback_artifact_path.trim();
+        let (html, source) = if path.is_empty() {
+            (artifact::EMBEDDED.to_owned(), artifact::Source::Embedded)
+        } else {
+            let read = std::fs::read_to_string(path).map_err(|e| Error::Config {
+                detail: format!("CALLBACK_ARTIFACT_PATH {path}: {e}"),
+            })?;
+            (read, artifact::Source::Supplied)
+        };
+
+        let document = artifact::CallbackDocument::compose(
+            &html,
+            &artifact::DeploymentInputs {
+                ccdp_origin,
+                allowed_origins,
+            },
+            source,
+        )
+        .map_err(|e| Error::Config {
+            detail: match source {
+                artifact::Source::Embedded => {
+                    format!("the compiled-in callback artifact is not serveable: {e}")
+                }
+                artifact::Source::Supplied => {
+                    format!("CALLBACK_ARTIFACT_PATH {path} is not serveable: {e}")
+                }
+            },
         })?;
-        (read, artifact::Source::Supplied)
-    };
 
-    let document = artifact::compose(
-        &html,
-        &artifact::DeploymentInputs {
-            ccdp_origin,
-            allowed_origins,
-        },
-        source,
-    )
-    .map_err(|e| Error::Config {
-        detail: match source {
-            artifact::Source::Embedded => {
-                format!("the compiled-in callback artifact is not serveable: {e}")
-            }
-            artifact::Source::Supplied => {
-                format!("CALLBACK_ARTIFACT_PATH {path} is not serveable: {e}")
-            }
-        },
-    })?;
-
-    // Read off the composed document rather than the local, so the field the
-    // rest of the process would consult is the one this line reports.
-    match document.source {
-        artifact::Source::Embedded => tracing::warn!(
-            "serving the COMPILED-IN callback artifact: it clears the OAuth return \
+        // Read off the composed document rather than the local, so the field the
+        // rest of the process would consult is the one this line reports.
+        match document.source {
+            artifact::Source::Embedded => tracing::warn!(
+                "serving the COMPILED-IN callback artifact: it clears the OAuth return \
              and renders fixed text, and completes no ceremony. Set \
              CALLBACK_ARTIFACT_PATH to a callback.html from the CCDP \
              Distribution before running this deployment."
-        ),
-        artifact::Source::Supplied => {
-            tracing::info!(path, "serving the configured callback artifact")
+            ),
+            artifact::Source::Supplied => {
+                tracing::info!(path, "serving the configured callback artifact")
+            }
         }
+        Ok(document)
     }
-    Ok(document)
 }
 
 /// The application origins admitted to read the configuration.

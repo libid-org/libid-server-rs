@@ -61,12 +61,14 @@ pub(crate) enum Origins<'a> {
 }
 
 /// Read them.
-pub(crate) fn origins(headers: &axum::http::HeaderMap) -> Origins<'_> {
-    let mut seen = headers.get_all(axum::http::header::ORIGIN).iter();
-    match (seen.next(), seen.next()) {
-        (Some(one), None) => Origins::One(one),
-        (Some(_), Some(_)) => Origins::Several,
-        (None, _) => Origins::Absent,
+impl<'a> Origins<'a> {
+    pub(crate) fn of(headers: &'a axum::http::HeaderMap) -> Self {
+        let mut seen = headers.get_all(axum::http::header::ORIGIN).iter();
+        match (seen.next(), seen.next()) {
+            (Some(one), None) => Origins::One(one),
+            (Some(_), Some(_)) => Origins::Several,
+            (None, _) => Origins::Absent,
+        }
     }
 }
 

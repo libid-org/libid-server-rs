@@ -67,30 +67,32 @@ enum Admitted {
 /// deployment cannot tell a sibling subdomain from itself without it. Neither
 /// `Referer` nor the request host is consulted: both are shaped by the caller,
 /// and this function does not read them.
-fn admit(state: &AppState, headers: &HeaderMap) -> Option<Admitted> {
-    let admitted = |o: &str| state.allowed_origins.iter().any(|a| a == o);
+impl Admitted {
+    fn of(state: &AppState, headers: &HeaderMap) -> Option<Self> {
+        let admitted = |o: &str| state.allowed_origins.iter().any(|a| a == o);
 
-    match crate::routes::origins(headers) {
-        // Present and exact, or refused. `null`, a malformed value and an
-        // unlisted one all land here and all fail.
-        crate::routes::Origins::One(origin) => {
-            origin.to_str().ok().filter(|o| admitted(o))?;
-            return Some(Admitted::Origin(origin.clone()));
+        match crate::routes::Origins::of(headers) {
+            // Present and exact, or refused. `null`, a malformed value and an
+            // unlisted one all land here and all fail.
+            crate::routes::Origins::One(origin) => {
+                origin.to_str().ok().filter(|o| admitted(o))?;
+                return Some(Admitted::Origin(origin.clone()));
+            }
+            crate::routes::Origins::Several => return None,
+            crate::routes::Origins::Absent => {}
         }
-        crate::routes::Origins::Several => return None,
-        crate::routes::Origins::Absent => {}
-    }
 
-    // No `Origin` at all. A top-level navigation and a same-origin fetch both
-    // look like this, so the metadata has to say which -- and the deployment
-    // has to have admitted its own origin, or there is no same-origin
-    // application to admit.
-    let mut sites = headers.get_all(&SEC_FETCH_SITE).iter();
-    match (sites.next(), sites.next()) {
-        (Some(site), None) if site.as_bytes() == b"same-origin" => state
-            .admits_same_origin_config
-            .then_some(Admitted::SameOrigin),
-        _ => None,
+        // No `Origin` at all. A top-level navigation and a same-origin fetch both
+        // look like this, so the metadata has to say which -- and the deployment
+        // has to have admitted its own origin, or there is no same-origin
+        // application to admit.
+        let mut sites = headers.get_all(&SEC_FETCH_SITE).iter();
+        match (sites.next(), sites.next()) {
+            (Some(site), None) if site.as_bytes() == b"same-origin" => state
+                .admits_same_origin_config
+                .then_some(Admitted::SameOrigin),
+            _ => None,
+        }
     }
 }
 
@@ -103,7 +105,7 @@ pub(crate) async fn config(
     // Admission decides before anything else looks at the request. A caller
     // that is not admitted learns that it is not admitted, and nothing about
     // whether the rest of its request would have been acceptable.
-    let Some(admitted) = admit(&state, &headers) else {
+    let Some(admitted) = Admitted::of(&state, &headers) else {
         return refuse(
             StatusCode::FORBIDDEN,
             "this configuration is readable only from an admitted origin",

@@ -336,7 +336,7 @@ pub(crate) async fn github_token(
     // shared with the configuration route so the two cannot drift on the part
     // they do agree about.
     let admitted = matches!(
-        crate::routes::origins(&headers),
+        crate::routes::Origins::of(&headers),
         crate::routes::Origins::One(origin)
             if origin.as_bytes() == github.ccdp_origin.as_bytes()
     );
@@ -654,33 +654,35 @@ struct Selection {
 /// and the browser's proof rests on the committed run in between. Each
 /// direction's commitments are the complement of its reveals, so both tile by
 /// construction — which is what the verifier's coverage check demands.
-fn select_layouts(sent: &[u8], recv: &[u8]) -> Result<Selection, ceremony::LayoutError> {
-    let sent_layout = ceremony::token_request(sent, Some(SECRET_FIELD))?;
-    let recv_layout = ceremony::token_response(recv)?;
-    let bearer = bearer_range(&recv_layout)?;
-    // `"access_token":""` frames an empty run, which the layout's complement
-    // never commits -- so no opening would match it, and the failure would
-    // surface as a notary fault. It is the same thing as no bearer at all, and
-    // it is GitHub's answer, not ours.
-    if bearer.is_empty() {
-        return Err(ceremony::LayoutError::MissingField("access_token".into()));
+impl Selection {
+    fn of(sent: &[u8], recv: &[u8]) -> Result<Self, ceremony::LayoutError> {
+        let sent_layout = ceremony::token_request(sent, Some(SECRET_FIELD))?;
+        let recv_layout = ceremony::token_response(recv)?;
+        let bearer = bearer_range(&recv_layout)?;
+        // `"access_token":""` frames an empty run, which the layout's complement
+        // never commits -- so no opening would match it, and the failure would
+        // surface as a notary fault. It is the same thing as no bearer at all, and
+        // it is GitHub's answer, not ours.
+        if bearer.is_empty() {
+            return Err(ceremony::LayoutError::MissingField("access_token".into()));
+        }
+        // Read here, off the transcript the notary attests, and never off the
+        // decoded response body. OAUTH_BRIDGE.md asks for the exact bearer the
+        // attestation commits, and the two are not always the same string: a JSON
+        // escape decodes, and a chunk boundary landing inside the value shifts
+        // everything after it. Handing back a bearer the commitment does not open
+        // fails later, in the circuit, where the reason is invisible.
+        let bearer_bytes = recv
+            .get(bearer.clone())
+            .ok_or_else(|| ceremony::LayoutError::MissingField("access_token".into()))?
+            .to_vec();
+        Ok(Selection {
+            sent: sent_layout,
+            recv: recv_layout,
+            bearer,
+            bearer_bytes,
+        })
     }
-    // Read here, off the transcript the notary attests, and never off the
-    // decoded response body. OAUTH_BRIDGE.md asks for the exact bearer the
-    // attestation commits, and the two are not always the same string: a JSON
-    // escape decodes, and a chunk boundary landing inside the value shifts
-    // everything after it. Handing back a bearer the commitment does not open
-    // fails later, in the circuit, where the reason is invisible.
-    let bearer_bytes = recv
-        .get(bearer.clone())
-        .ok_or_else(|| ceremony::LayoutError::MissingField("access_token".into()))?
-        .to_vec();
-    Ok(Selection {
-        sent: sent_layout,
-        recv: recv_layout,
-        bearer,
-        bearer_bytes,
-    })
 }
 
 /// The error code GitHub returns for a code that was spent, replayed or never
@@ -713,14 +715,16 @@ pub(crate) enum PlatformAnswer {
 ///
 /// The whole reading survives as one enum value. Nothing the platform wrote
 /// travels further: what reaches a log or a caller is this service's own words.
-fn classify(recv: &[u8]) -> PlatformAnswer {
-    let holds = |needle: &[u8]| recv.windows(needle.len()).any(|w| w == needle);
-    if holds(BAD_CODE) {
-        PlatformAnswer::RefusedTheCode
-    } else if holds(ERROR_FIELD) {
-        PlatformAnswer::RefusedThisDeployment
-    } else {
-        PlatformAnswer::Unusable
+impl PlatformAnswer {
+    fn in_response(recv: &[u8]) -> Self {
+        let holds = |needle: &[u8]| recv.windows(needle.len()).any(|w| w == needle);
+        if holds(BAD_CODE) {
+            PlatformAnswer::RefusedTheCode
+        } else if holds(ERROR_FIELD) {
+            PlatformAnswer::RefusedThisDeployment
+        } else {
+            PlatformAnswer::Unusable
+        }
     }
 }
 
@@ -729,7 +733,7 @@ fn classify(recv: &[u8]) -> PlatformAnswer {
 /// The session ran and the response arrived carrying no `access_token` for the
 /// layout to anchor on. WHOSE fault that is decides the answer, and GitHub
 /// returns `200` for every one of them, so the status cannot decide it -- the
-/// error code can, and [`classify`] reads it.
+/// error code can, and [`PlatformAnswer::in_response`] reads it.
 ///
 /// `bad_verification_code` is the caller's: a double-clicked button, a reloaded
 /// callback, a stale link. Every other named code --
@@ -816,7 +820,7 @@ async fn exchange(
         libid_tlsn::prover_generic(
             socket,
             http_request,
-            |sent, recv| match select_layouts(sent, recv) {
+            |sent, recv| match Selection::of(sent, recv) {
                 Ok(Selection {
                     sent,
                     recv,
@@ -827,7 +831,7 @@ async fn exchange(
                     Ok((sent, recv))
                 }
                 Err(e) => {
-                    answer = classify(recv);
+                    answer = PlatformAnswer::in_response(recv);
                     let failed = layout_failed(&e);
                     refusal = Some(e);
                     Err(failed)
@@ -1037,7 +1041,7 @@ mod tests {
     fn both_directions_of_the_session_tile() {
         let credentials = credentials("ghs_averyrealisticlookingclientsecret00");
         let sent = sent(&credentials, &request());
-        let found = select_layouts(&sent, RECV).unwrap();
+        let found = Selection::of(&sent, RECV).unwrap();
 
         for (layout, len, what) in [
             (&found.sent, sent.len(), "request"),
@@ -1078,7 +1082,7 @@ mod tests {
         let sent = sent(&credentials, &request());
         const ERROR: &[u8] =
             b"HTTP/1.1 200 OK\r\n\r\n{\"error\":\"bad_verification_code\"}";
-        assert!(select_layouts(&sent, ERROR).is_err());
+        assert!(Selection::of(&sent, ERROR).is_err());
     }
 
     /// GitHub answers `200` to a spent code AND to a wrong client secret, so
@@ -1317,7 +1321,7 @@ mod tests {
 
         // Destructured rather than `unwrap_err`, which would need `Debug` on
         // `Selection` -- and `Selection` carries the bearer.
-        let Err(refusal) = select_layouts(&sent, recv) else {
+        let Err(refusal) = Selection::of(&sent, recv) else {
             panic!("an empty bearer must not produce a selection")
         };
         assert!(
@@ -1330,7 +1334,7 @@ mod tests {
         // wrong credentials -- and answering it as either would tell a user to
         // retry what cannot succeed, or page an operator over a secret that is
         // fine.
-        let answer = classify(recv);
+        let answer = PlatformAnswer::in_response(recv);
         assert_eq!(answer, PlatformAnswer::Unusable);
         let told = platform_refusal(Some(&refusal), answer).expect("a platform refusal");
         assert!(matches!(told, Error::MpcTlsFailed { .. }));
@@ -1364,7 +1368,7 @@ mod tests {
             (r#"{"access_token":""}"#, PlatformAnswer::Unusable),
             (r#"{}"#, PlatformAnswer::Unusable),
         ] {
-            assert_eq!(classify(&body(json)), expected, "{json}");
+            assert_eq!(PlatformAnswer::in_response(&body(json)), expected, "{json}");
         }
 
         // And each maps to a different answer, which is why they are told
@@ -1397,10 +1401,11 @@ mod tests {
         let sent = sent(&credentials, &request());
         let recv = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"error\":\"bad_verification_code\"}";
 
-        let Err(refusal) = select_layouts(&sent, recv) else {
+        let Err(refusal) = Selection::of(&sent, recv) else {
             panic!("a response with no bearer must not produce a selection")
         };
-        let told = platform_refusal(Some(&refusal), classify(recv)).expect("a refusal");
+        let told = platform_refusal(Some(&refusal), PlatformAnswer::in_response(recv))
+            .expect("a refusal");
         assert_eq!(
             TokenError::from_exchange(told).status,
             StatusCode::BAD_REQUEST,

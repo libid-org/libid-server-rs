@@ -33,8 +33,8 @@ use sha2::{
 };
 
 use scan::{
-    scan,
     ArtifactError,
+    Layout,
 };
 
 /// The artifact compiled into this binary.
@@ -85,66 +85,69 @@ pub(crate) struct CallbackDocument {
     pub(crate) source: Source,
 }
 
-/// Configure one artifact and compose the response it is served as.
-///
-/// Private fields and this as the only constructor, because the property the
-/// whole document rests on -- the policy names the hash of the script the body
-/// carries -- is established here and nowhere else. A pair assembled anywhere
-/// else is a document a browser refuses to run, served `200`.
-pub(crate) fn compose(
-    html: &str,
-    inputs: &DeploymentInputs<'_>,
-    source: Source,
-) -> Result<CallbackDocument, ArtifactError> {
-    let layout = scan(html)?;
-    // The marker rule, which belongs to insertion rather than to reading a
-    // document's shape: the slot must hold exactly the token, and the token
-    // must occur nowhere else -- a second occurrence inside a bundled string
-    // literal would make "repeated markers reject the artifact" depend on
-    // which one a reader found first.
-    if html[layout.slot.clone()].trim() != scan::MARKER
-        || html.matches(scan::MARKER).count() != 1
-    {
-        return Err(ArtifactError::Marker);
+impl CallbackDocument {
+    /// Configure one artifact and compose the response it is served as.
+    ///
+    /// Private fields and this as the only constructor, because the property
+    /// the whole document rests on -- the policy names the hash of the script
+    /// the body carries -- is established here and nowhere else. A pair
+    /// assembled anywhere else is a document a browser refuses to run, served
+    /// `200`.
+    pub(crate) fn compose(
+        html: &str,
+        inputs: &DeploymentInputs<'_>,
+        source: Source,
+    ) -> Result<CallbackDocument, ArtifactError> {
+        let layout = Layout::scan(html)?;
+        // The marker rule, which belongs to insertion rather than to reading a
+        // document's shape: the slot must hold exactly the token, and the token
+        // must occur nowhere else -- a second occurrence inside a bundled string
+        // literal would make "repeated markers reject the artifact" depend on
+        // which one a reader found first.
+        if html[layout.slot.clone()].trim() != scan::MARKER
+            || html.matches(scan::MARKER).count() != 1
+        {
+            return Err(ArtifactError::Marker);
+        }
+
+        // One unversioned list, derived from configuration this bridge has already
+        // validated and published. The contract: "no version-keyed wrapper,
+        // input-declaration block, or Bridge-side CCDP version list", and every
+        // bundled implementation receives the same list.
+        let record = serde_json::json!([inputs.allowed_origins, inputs.ccdp_origin]);
+        let mut body = String::with_capacity(html.len());
+        body.push_str(&html[..layout.slot.start]);
+        body.push_str(&json(&record));
+        body.push_str(&html[layout.slot.end..]);
+
+        // "Data substitution does not change executable bytes." The slot is
+        // `application/json` and nothing hashes it, so that is true by
+        // construction -- and this turns "by construction" into something that
+        // runs on every compose rather than an argument in a comment.
+        let after = Layout::scan(&body)?;
+        let before: Vec<String> = layout
+            .executables
+            .iter()
+            .map(|r| hash_source(&html[r.clone()]))
+            .collect();
+        let hashes: Vec<String> = after
+            .executables
+            .iter()
+            .map(|r| hash_source(&body[r.clone()]))
+            .collect();
+        if before != hashes {
+            return Err(ArtifactError::SubstitutionMovedExecutableBytes);
+        }
+
+        let csp = policy(&hashes, inputs.ccdp_origin);
+        let csp = HeaderValue::from_str(&csp)
+            .map_err(|e| ArtifactError::Policy(format!("{csp:?}: {e}")))?;
+        Ok(CallbackDocument {
+            body: Bytes::from(body),
+            csp,
+            source,
+        })
     }
-
-    // One unversioned list, derived from configuration this bridge has already
-    // validated and published. The contract: "no version-keyed wrapper,
-    // input-declaration block, or Bridge-side CCDP version list", and every
-    // bundled implementation receives the same list.
-    let record = serde_json::json!([inputs.allowed_origins, inputs.ccdp_origin]);
-    let mut body = String::with_capacity(html.len());
-    body.push_str(&html[..layout.slot.start]);
-    body.push_str(&json(&record));
-    body.push_str(&html[layout.slot.end..]);
-
-    // "Data substitution does not change executable bytes." The slot is
-    // `application/json` and nothing hashes it, so that is true by
-    // construction -- and this turns "by construction" into something that
-    // runs on every compose rather than an argument in a comment.
-    let after = scan(&body)?;
-    let before: Vec<String> = layout
-        .executables
-        .iter()
-        .map(|r| hash_source(&html[r.clone()]))
-        .collect();
-    let hashes: Vec<String> = after
-        .executables
-        .iter()
-        .map(|r| hash_source(&body[r.clone()]))
-        .collect();
-    if before != hashes {
-        return Err(ArtifactError::SubstitutionMovedExecutableBytes);
-    }
-
-    let csp = policy(&hashes, inputs.ccdp_origin);
-    let csp = HeaderValue::from_str(&csp)
-        .map_err(|e| ArtifactError::Policy(format!("{csp:?}: {e}")))?;
-    Ok(CallbackDocument {
-        body: Bytes::from(body),
-        csp,
-        source,
-    })
 }
 
 /// The response policy, from the hashes of the scripts this document carries
@@ -228,7 +231,7 @@ mod tests {
     }
 
     fn composed(html: &str, origins: &[String]) -> CallbackDocument {
-        compose(
+        CallbackDocument::compose(
             html,
             &DeploymentInputs {
                 ccdp_origin: "https://ccdp.example",
@@ -347,7 +350,7 @@ mod tests {
     fn a_slot_that_does_not_hold_exactly_the_marker_is_refused() {
         let filled = EMBEDDED.replace(scan::MARKER, "[]");
         assert!(matches!(
-            compose(
+            CallbackDocument::compose(
                 &filled,
                 &DeploymentInputs {
                     ccdp_origin: "https://ccdp.example",
@@ -366,7 +369,7 @@ mod tests {
             &format!("// {}\nconst query =", scan::MARKER),
         );
         assert!(matches!(
-            compose(
+            CallbackDocument::compose(
                 &twice,
                 &DeploymentInputs {
                     ccdp_origin: "https://ccdp.example",

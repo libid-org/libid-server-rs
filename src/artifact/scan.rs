@@ -80,74 +80,77 @@ pub(crate) struct Layout {
     pub(crate) executables: Vec<Range<usize>>,
 }
 
-/// Read an artifact, or refuse it.
-pub(crate) fn scan(html: &str) -> Result<Layout, ArtifactError> {
-    if html.len() > MAX_ARTIFACT_BYTES {
-        return Err(ArtifactError::TooLarge(html.len()));
-    }
-    refuse_hostile_bytes(html)?;
-
-    let bytes = html.as_bytes();
-    let mut slots: Vec<Range<usize>> = Vec::new();
-    let mut executables: Vec<Range<usize>> = Vec::new();
-    let mut mounts = 0usize;
-    let mut at = 0usize;
-
-    while at < bytes.len() {
-        let Some(next) = html[at..].find('<') else {
-            break
-        };
-        let open = at + next;
-
-        // A `<` in text that is not a tag start. `&lt;` is how a document says
-        // it means the character, and an artifact that does not is one whose
-        // author and this reader disagree about where elements begin.
-        let rest = &html[open..];
-        if rest.starts_with(SLOT_OPEN) {
-            let text = open + SLOT_OPEN.len();
-            let end = close_of(html, text)?;
-            slots.push(text..end);
-            at = end + SCRIPT_CLOSE.len();
-        } else if rest.starts_with(MODULE_OPEN) {
-            let text = open + MODULE_OPEN.len();
-            let end = close_of(html, text)?;
-            executables.push(text..end);
-            at = end + SCRIPT_CLOSE.len();
-        } else if let Some(after) = foreign_subtree(html, open)? {
-            // Foreign content. The artifact is documented as carrying an
-            // inline logo, so refusing SVG outright would refuse every real
-            // artifact -- and it would do so late, after vendoring.
-            at = after;
-        } else if rest.len() > 7 && rest.as_bytes()[1..7].eq_ignore_ascii_case(b"script")
-        {
-            // Any other script element: a `src`, a nonce, a classic script, an
-            // attribute in another order. Each is a shape this bridge has not
-            // reasoned about, and refusing costs a log line while guessing
-            // costs a wrong hash.
-            return Err(ArtifactError::UnreadableScript(open));
-        } else {
-            if rest.starts_with("<main id=\"libid-root\"></main>") {
-                mounts += 1;
-            }
-            at = ordinary_tag(html, open)?;
+impl Layout {
+    /// Read an artifact, or refuse it.
+    pub(crate) fn scan(html: &str) -> Result<Layout, ArtifactError> {
+        if html.len() > MAX_ARTIFACT_BYTES {
+            return Err(ArtifactError::TooLarge(html.len()));
         }
-    }
+        refuse_hostile_bytes(html)?;
 
-    // Exactly one slot ELEMENT. Whether it still holds the marker is not asked
-    // here: this runs twice, once on the artifact and once on the composed
-    // document, and substitution is precisely what removes the marker.
-    // [`super::compose`] owns that rule.
-    if slots.len() != 1 {
-        return Err(ArtifactError::Markers(slots.len()));
+        let bytes = html.as_bytes();
+        let mut slots: Vec<Range<usize>> = Vec::new();
+        let mut executables: Vec<Range<usize>> = Vec::new();
+        let mut mounts = 0usize;
+        let mut at = 0usize;
+
+        while at < bytes.len() {
+            let Some(next) = html[at..].find('<') else {
+                break
+            };
+            let open = at + next;
+
+            // A `<` in text that is not a tag start. `&lt;` is how a document says
+            // it means the character, and an artifact that does not is one whose
+            // author and this reader disagree about where elements begin.
+            let rest = &html[open..];
+            if rest.starts_with(SLOT_OPEN) {
+                let text = open + SLOT_OPEN.len();
+                let end = close_of(html, text)?;
+                slots.push(text..end);
+                at = end + SCRIPT_CLOSE.len();
+            } else if rest.starts_with(MODULE_OPEN) {
+                let text = open + MODULE_OPEN.len();
+                let end = close_of(html, text)?;
+                executables.push(text..end);
+                at = end + SCRIPT_CLOSE.len();
+            } else if let Some(after) = foreign_subtree(html, open)? {
+                // Foreign content. The artifact is documented as carrying an
+                // inline logo, so refusing SVG outright would refuse every real
+                // artifact -- and it would do so late, after vendoring.
+                at = after;
+            } else if rest.len() > 7
+                && rest.as_bytes()[1..7].eq_ignore_ascii_case(b"script")
+            {
+                // Any other script element: a `src`, a nonce, a classic script, an
+                // attribute in another order. Each is a shape this bridge has not
+                // reasoned about, and refusing costs a log line while guessing
+                // costs a wrong hash.
+                return Err(ArtifactError::UnreadableScript(open));
+            } else {
+                if rest.starts_with("<main id=\"libid-root\"></main>") {
+                    mounts += 1;
+                }
+                at = ordinary_tag(html, open)?;
+            }
+        }
+
+        // Exactly one slot ELEMENT. Whether it still holds the marker is not asked
+        // here: this runs twice, once on the artifact and once on the composed
+        // document, and substitution is precisely what removes the marker.
+        // [`super::compose`] owns that rule.
+        if slots.len() != 1 {
+            return Err(ArtifactError::Markers(slots.len()));
+        }
+        let slot = slots.remove(0);
+        if executables.is_empty() || executables.len() > MAX_EXECUTABLES {
+            return Err(ArtifactError::Executables(executables.len()));
+        }
+        if mounts != 1 {
+            return Err(ArtifactError::MountPoint);
+        }
+        Ok(Layout { slot, executables })
     }
-    let slot = slots.remove(0);
-    if executables.is_empty() || executables.len() > MAX_EXECUTABLES {
-        return Err(ArtifactError::Executables(executables.len()));
-    }
-    if mounts != 1 {
-        return Err(ArtifactError::MountPoint);
-    }
-    Ok(Layout { slot, executables })
 }
 
 /// Bytes that make the rest of this reader unsound, refused before anything
@@ -364,7 +367,7 @@ mod tests {
                 super::MARKER
             );
             // The contract is only that it returns rather than unwinds.
-            let _ = scan(&doc);
+            let _ = Layout::scan(&doc);
         }
     }
 
@@ -388,7 +391,7 @@ mod tests {
 
     #[test]
     fn the_compiled_in_artifact_is_readable() {
-        let layout = scan(super::super::EMBEDDED).expect("the floor must scan");
+        let layout = Layout::scan(super::super::EMBEDDED).expect("the floor must scan");
         assert_eq!(super::super::EMBEDDED[layout.slot].trim(), MARKER);
         assert_eq!(layout.executables.len(), 1);
     }
@@ -399,7 +402,7 @@ mod tests {
     #[test]
     fn the_executable_span_is_the_script_text_exactly() {
         let html = module("let x = 1;");
-        let layout = scan(&html).unwrap();
+        let layout = Layout::scan(&html).unwrap();
         assert_eq!(&html[layout.executables[0].clone()], "let x = 1;");
     }
 
@@ -409,23 +412,26 @@ mod tests {
     fn bytes_that_would_desynchronise_the_hash_are_refused() {
         // CR is normalised to LF by the HTML input stream before tokenizing.
         assert!(matches!(
-            scan(&module("let x = 1;\r\n")),
+            Layout::scan(&module("let x = 1;\r\n")),
             Err(ArtifactError::Forbidden("a carriage return", _))
         ));
         // `<!--` in script data enters the escaped states, where `</script>`
         // no longer necessarily closes the element.
         assert!(matches!(
-            scan(&module("<!-- x -->")),
+            Layout::scan(&module("<!-- x -->")),
             Err(ArtifactError::Forbidden("an HTML comment", _))
         ));
         for hostile in ["<![CDATA[x]]>", "<?x?>"] {
             assert!(
-                matches!(scan(&doc(hostile)), Err(ArtifactError::Forbidden(..))),
+                matches!(
+                    Layout::scan(&doc(hostile)),
+                    Err(ArtifactError::Forbidden(..))
+                ),
                 "accepted {hostile}"
             );
         }
         assert!(matches!(
-            scan(&module("let x = 1;\u{0}")),
+            Layout::scan(&module("let x = 1;\u{0}")),
             Err(ArtifactError::Forbidden("a control byte", _))
         ));
     }
@@ -448,7 +454,8 @@ mod tests {
             let html = doc(&format!(
                 "{logo}<script type=\"module\">let x = 1;</script>"
             ));
-            let layout = scan(&html).unwrap_or_else(|e| panic!("refused {logo}: {e}"));
+            let layout =
+                Layout::scan(&html).unwrap_or_else(|e| panic!("refused {logo}: {e}"));
             assert_eq!(&html[layout.executables[0].clone()], "let x = 1;");
         }
 
@@ -461,7 +468,7 @@ mod tests {
             ));
             assert!(
                 matches!(
-                    scan(&html),
+                    Layout::scan(&html),
                     Err(ArtifactError::Forbidden(
                         "a script inside foreign content",
                         _
@@ -483,7 +490,10 @@ mod tests {
             "<SCRIPT TYPE=\"module\">x</SCRIPT>",
         ] {
             assert!(
-                matches!(scan(&doc(hostile)), Err(ArtifactError::UnreadableScript(_))),
+                matches!(
+                    Layout::scan(&doc(hostile)),
+                    Err(ArtifactError::UnreadableScript(_))
+                ),
                 "accepted {hostile}"
             );
         }
@@ -498,7 +508,7 @@ mod tests {
         for hostile in ["</script >", "</script\n>", "</SCRIPT>"] {
             let html = module(&format!("let s = '{hostile}';"));
             assert!(
-                matches!(scan(&html), Err(ArtifactError::Malformed(_))),
+                matches!(Layout::scan(&html), Err(ArtifactError::Malformed(_))),
                 "accepted {hostile}"
             );
         }
@@ -513,7 +523,7 @@ mod tests {
         for hostile in ["<p class='x'>", "<p>a < b</p>"] {
             assert!(
                 matches!(
-                    scan(&doc(&format!(
+                    Layout::scan(&doc(&format!(
                         "{hostile}<script type=\"module\">x</script>"
                     ))),
                     Err(ArtifactError::Malformed(_))
@@ -530,35 +540,44 @@ mod tests {
             "<script id=\"libid-callback-config\" type=\"application/json\">x</script>\
              <script type=\"module\">x</script>",
         );
-        assert!(matches!(scan(&two), Err(ArtifactError::Markers(2))));
+        assert!(matches!(Layout::scan(&two), Err(ArtifactError::Markers(2))));
 
         // No executable at all.
-        assert!(matches!(scan(&doc("")), Err(ArtifactError::Executables(0))));
+        assert!(matches!(
+            Layout::scan(&doc("")),
+            Err(ArtifactError::Executables(0))
+        ));
 
         // More than the shape admits.
         let many: String = (0..MAX_EXECUTABLES + 1)
             .map(|_| "<script type=\"module\">x</script>")
             .collect();
         assert!(matches!(
-            scan(&doc(&many)),
+            Layout::scan(&doc(&many)),
             Err(ArtifactError::Executables(_))
         ));
 
         // No mount point, and two.
         let no_mount = module("x").replace("<main id=\"libid-root\"></main>", "");
-        assert!(matches!(scan(&no_mount), Err(ArtifactError::MountPoint)));
+        assert!(matches!(
+            Layout::scan(&no_mount),
+            Err(ArtifactError::MountPoint)
+        ));
         let two_mounts = module("x").replace(
             "<main id=\"libid-root\"></main>",
             "<main id=\"libid-root\"></main><main id=\"libid-root\"></main>",
         );
-        assert!(matches!(scan(&two_mounts), Err(ArtifactError::MountPoint)));
+        assert!(matches!(
+            Layout::scan(&two_mounts),
+            Err(ArtifactError::MountPoint)
+        ));
     }
 
     #[test]
     fn an_artifact_over_the_bound_is_refused_before_it_is_read() {
         let huge = "a".repeat(MAX_ARTIFACT_BYTES + 1);
         assert!(
-            matches!(scan(&huge), Err(ArtifactError::TooLarge(n)) if n == huge.len())
+            matches!(Layout::scan(&huge), Err(ArtifactError::TooLarge(n)) if n == huge.len())
         );
     }
 }
