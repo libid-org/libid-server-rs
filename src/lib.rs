@@ -165,10 +165,7 @@ impl artifact::CallbackDocument {
         let (html, source) = if path.is_empty() {
             (artifact::EMBEDDED.to_owned(), artifact::Source::Embedded)
         } else {
-            let read = std::fs::read_to_string(path).map_err(|e| Error::Config {
-                detail: format!("CALLBACK_ARTIFACT_PATH {path}: {e}"),
-            })?;
-            (read, artifact::Source::Supplied)
+            (read_artifact(path)?, artifact::Source::Supplied)
         };
 
         let document = artifact::CallbackDocument::compose(
@@ -205,6 +202,44 @@ impl artifact::CallbackDocument {
         }
         Ok(document)
     }
+}
+
+/// Read a configured artifact, refusing one over the bound before reading it.
+///
+/// `read_to_string` alone would pull the whole file into memory and only then
+/// hand it to a scanner that refuses anything over `MAX_ARTIFACT_BYTES` -- so
+/// the bound would describe what this service is willing to SCAN while saying
+/// nothing about what it is willing to READ, and a deployment that pointed the
+/// setting at the wrong file would find that out as an allocation rather than
+/// as a message naming the setting.
+///
+/// The size is read off the handle rather than the path, so what is measured is
+/// the file that is then read.
+fn read_artifact(path: &str) -> Result<String> {
+    use std::io::Read as _;
+
+    let refuse = |detail: String| Error::Config {
+        detail: format!("CALLBACK_ARTIFACT_PATH {path}: {detail}"),
+    };
+    let file = std::fs::File::open(path).map_err(|e| refuse(format!("{e}")))?;
+    let len = file.metadata().map_err(|e| refuse(format!("{e}")))?.len();
+    let bound = artifact::scan::MAX_ARTIFACT_BYTES as u64;
+    if len > bound {
+        return Err(refuse(format!(
+            "is {len} bytes, over the {bound}-byte bound"
+        )));
+    }
+    // Bounded again on the way in: `metadata` describes the file as it was a
+    // moment ago, and a growing one would otherwise be read whole. One byte
+    // over is enough to refuse -- nothing is served from a prefix.
+    let mut html = String::new();
+    file.take(bound + 1)
+        .read_to_string(&mut html)
+        .map_err(|e| refuse(format!("{e}")))?;
+    if html.len() as u64 > bound {
+        return Err(refuse(format!("is over the {bound}-byte bound")));
+    }
+    Ok(html)
 }
 
 /// The application origins admitted to read the configuration.
@@ -399,6 +434,15 @@ fn notary_addr(url: &Url) -> Result<state::NotaryAddr> {
     let host = url.host_str().ok_or_else(|| Error::NotaryUrl {
         detail: format!("{url} names no host"),
     })?;
+    // Lowercased HERE, because `url` does not do it for us at this scheme.
+    // Host case folding is a property of the SPECIAL schemes -- `https` gets an
+    // IDNA-normalised host, `tcp` gets the bytes as written. The token route
+    // parses the caller's `notaryAddress`, which is `https`, and compares the
+    // two hosts byte for byte; without this an operator writing
+    // `NOTARY_URL=tcp://Testnet.Notary.Lib.ID:7047` is refused on every request
+    // by a caller naming the same notary correctly. DNS does not care about the
+    // difference, so nothing else in the process would ever notice.
+    let host = host.to_ascii_lowercase();
     // `port_or_known_default`, not `port`: `Url` drops a port that is its
     // scheme's default during normalisation, so `https://notary.example:443`
     // would otherwise be refused for naming no port while plainly naming one.
@@ -408,10 +452,7 @@ fn notary_addr(url: &Url) -> Result<state::NotaryAddr> {
         .ok_or_else(|| Error::NotaryUrl {
             detail: format!("{url} names no port, and its scheme implies none"),
         })?;
-    Ok(state::NotaryAddr {
-        host: host.to_owned(),
-        port,
-    })
+    Ok(state::NotaryAddr { host, port })
 }
 
 #[cfg(test)]
@@ -593,6 +634,48 @@ mod tests {
     /// An underscore is legal in a host, is a byte a browser sends unchanged,
     /// and is not Content-Security-Policy syntax -- so the byte filter that
     /// exists to keep CSP delimiters out must not take it with them.
+    /// The bound is on what this service READS, not only on what it scans.
+    ///
+    /// `MAX_ARTIFACT_BYTES` guards the scanner, and the artifact is a file a
+    /// deployment names -- so a setting pointed at the wrong file used to be
+    /// pulled into memory whole and refused afterwards, which is a message
+    /// about a setting arriving as an allocation.
+    #[test]
+    fn an_artifact_file_over_the_bound_is_refused_before_it_is_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "libid-artifact-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let too_big = dir.join("too-big.html");
+        std::fs::write(&too_big, vec![b'x'; artifact::scan::MAX_ARTIFACT_BYTES + 1])
+            .unwrap();
+        let Err(refusal) = build_state(&config(&[
+            "--callback-artifact-path",
+            too_big.to_str().unwrap(),
+        ])) else {
+            panic!("an artifact over the bound is not serveable")
+        };
+        let detail = format!("{refusal}");
+        assert!(detail.contains("bound"), "{detail}");
+        assert!(detail.contains("CALLBACK_ARTIFACT_PATH"), "{detail}");
+
+        // And a file within it is read and composed, so the bound is a bound
+        // and not a refusal of every configured artifact.
+        let fine = dir.join("fine.html");
+        std::fs::write(&fine, artifact::EMBEDDED).unwrap();
+        let state = build_state(&config(&[
+            "--callback-artifact-path",
+            fine.to_str().unwrap(),
+        ]))
+        .expect("a configured artifact within the bound is serveable");
+        assert_eq!(state.callback.source, artifact::Source::Supplied);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn an_underscore_in_a_host_is_an_origin_like_any_other() {
         for spelling in [

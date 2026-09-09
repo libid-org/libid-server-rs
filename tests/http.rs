@@ -133,10 +133,24 @@ async fn post_token(origin: Option<&str>, body: String) -> axum::response::Respo
 /// listener, and only the host says they mean the same service.
 const NOTARY: &str = "https://127.0.0.1:7048";
 
-fn valid_body() -> String {
+/// A request body carrying every field, varying only the two under test.
+///
+/// One shape, because the tests below are a comparison: they mean something
+/// only while the body they refuse and the body they admit differ in nothing
+/// else. Built rather than written out, so a later edit cannot quietly drop a
+/// field from one of them and leave the pair asserting nothing.
+fn token_body(code: &str, verifier: &str) -> String {
     format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{NOTARY}"}}"#
+        r#"{{"code":"{code}","codeVerifier":"{verifier}","notaryAddress":"{NOTARY}"}}"#
     )
+}
+
+/// A code of the shape GitHub issues, for the cases where the code is not what
+/// is under test.
+const CODE: &str = "6b7f2c1d9e4a8035";
+
+fn valid_body() -> String {
+    token_body(CODE, VERIFIER)
 }
 
 #[tokio::test]
@@ -177,19 +191,55 @@ async fn github_token_refuses_a_malformed_body() {
 
 #[tokio::test]
 async fn github_token_refuses_an_over_long_code() {
-    let body = format!(
-        r#"{{"code":"{}","codeVerifier":"{VERIFIER}"}}"#,
-        "a".repeat(4096)
+    assert_eq!(
+        answer_with_no_permit_free(token_body(&"a".repeat(4096), VERIFIER)).await,
+        StatusCode::BAD_REQUEST
     );
-    let resp = post_token(Some(ORIGIN), body).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn github_token_refuses_a_verifier_of_the_wrong_length() {
-    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
-    let resp = post_token(Some(ORIGIN), body.into()).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        answer_with_no_permit_free(token_body(CODE, "tooshort")).await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// The control the two tests above rest on, and the reason they hold a permit.
+///
+/// Both the JSON rejection and the `validate()` refusal answer `400` with the
+/// same message -- deliberately, so a caller cannot tell one from the other --
+/// so a `400` alone proves nothing about WHICH refused. These two once sent
+/// bodies with no `notaryAddress` at all: serde refused them for the missing
+/// field, and neither test ever reached the bound it is named for.
+///
+/// With no permit free, a body that gets past the bounds is answered `503` by
+/// the next gate. So this and the two above form one comparison: three bodies
+/// of one shape, differing only in the field under test, and the `400`s are the
+/// bounds because this one is not a `400`.
+#[tokio::test]
+async fn a_body_within_the_bounds_gets_past_them() {
+    assert_eq!(
+        answer_with_no_permit_free(valid_body()).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+/// Post a body to a deployment holding every exchange permit, and answer what
+/// the route said. Nothing is dialled: the permit gate refuses first.
+async fn answer_with_no_permit_free(body: String) -> StatusCode {
+    let state = test_state();
+    let _held = state
+        .exchange_permits()
+        .expect("github is enabled")
+        .try_acquire_many(libid_server_rs::state::MAX_CONCURRENT_EXCHANGES as u32)
+        .expect("every permit is free at the start of this test");
+    let req = Request::post("/api/v1/ceremony/github-token")
+        .header("content-type", "application/json")
+        .header("origin", ORIGIN)
+        .body(Body::from(body))
+        .unwrap();
+    app(state.clone()).oneshot(req).await.unwrap().status()
 }
 
 /// Each exchange is a full MPC-TLS session and an outbound request that spends
@@ -814,6 +864,44 @@ async fn github_token_requires_the_notary_it_serves() {
         );
         let resp = post_token(Some(ORIGIN), body).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{other}");
+    }
+}
+
+/// The configured notary and the one a request names are compared byte for
+/// byte, and they are parsed out of two different schemes.
+///
+/// `url` folds a host's case for its SPECIAL schemes only: `https` gets an
+/// IDNA-normalised host, `tcp` gets the bytes the operator typed. So a
+/// deployment configured `tcp://Testnet.Notary.Lib.ID:7047` held
+/// `"Testnet.Notary.Lib.ID"` while every conforming Prover names
+/// `https://testnet.notary.lib.id`, and every token request was refused `403`
+/// against a caller that was right. The fixture's `127.0.0.1` has no case, so
+/// nothing else in this suite could see it -- and DNS has none either, so the
+/// dial this refuses would have worked.
+#[tokio::test]
+async fn github_token_admits_its_notary_however_the_operator_spelled_it() {
+    for spelling in [
+        "tcp://Testnet.Notary.Lib.ID:7047",
+        "tcp://TESTNET.NOTARY.LIB.ID:7047",
+        "tcp://testnet.notary.lib.id:7047",
+    ] {
+        let state = deployment(&["--notary-url", spelling]);
+        let body = format!(
+            r#"{{"code":"{CODE}","codeVerifier":"tooshort","notaryAddress":"https://testnet.notary.lib.id"}}"#
+        );
+        let req = Request::post("/api/v1/ceremony/github-token")
+            .header("content-type", "application/json")
+            .header("origin", ORIGIN)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app(state).oneshot(req).await.unwrap();
+        // Admitted, then refused by the NEXT gate -- which is how admission is
+        // proved without opening a session.
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "{spelling} names the notary this request does"
+        );
     }
 }
 

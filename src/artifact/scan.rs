@@ -251,6 +251,17 @@ fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactErr
             rest.as_bytes()
                 .get(1..=n.len())
                 .is_some_and(|t| t.eq_ignore_ascii_case(n.as_bytes()))
+                // And the name ENDS there. Without this, `svg` and `math`
+                // match as prefixes, so `<math-field>` -- an ordinary custom
+                // element, and custom elements must carry a hyphen -- is
+                // stepped over as foreign content, taking any `<script>` after
+                // it inside the skipped span with it. That script is then
+                // neither hashed nor named in the policy, and the browser
+                // refuses to run the document this bridge just served `200`.
+                && rest
+                    .as_bytes()
+                    .get(1 + n.len())
+                    .is_none_or(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
         });
     let Some(name) = name else { return Ok(None) };
 
@@ -521,6 +532,26 @@ mod tests {
             let layout =
                 Layout::scan(&html).unwrap_or_else(|e| panic!("refused {logo}: {e}"));
             assert_eq!(&html[layout.executables[0].clone()], "let x = 1;");
+        }
+
+        // An element whose NAME merely STARTS with one of those is not foreign
+        // content. Custom elements must carry a hyphen, so `<math-field>` is
+        // an ordinary one -- and a bundled Callback that used it had its
+        // module read as a script inside MathML and the whole artifact
+        // refused, which under a retrieving deployment is a bridge that will
+        // not start.
+        for ordinary in [
+            "<math-field><script type=\"module\">let x = 1;</script></math-field>",
+            "<svg-icon>logo</svg-icon><script type=\"module\">let x = 1;</script>",
+        ] {
+            let html = doc(ordinary);
+            let layout =
+                Layout::scan(&html).unwrap_or_else(|e| panic!("refused {ordinary}: {e}"));
+            assert_eq!(
+                &html[layout.executables[0].clone()],
+                "let x = 1;",
+                "{ordinary} carries an ordinary element, not foreign content"
+            );
         }
 
         for hostile in [
