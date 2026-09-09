@@ -208,8 +208,17 @@ fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
     if let Some(i) = html.find("<?") {
         return Err(ArtifactError::Forbidden("a processing instruction", i));
     }
-    if let Some(i) = find_ci(html.as_bytes(), b"<![cdata[") {
-        return Err(ArtifactError::Forbidden("a CDATA section", i));
+    // `<![` carries no letter, so the scan that finds it needs no case
+    // folding -- and `str::find` on three bytes is a different cost from
+    // comparing nine case-insensitively at every offset. Only the word after
+    // it has to be matched either way, and only where the bracket already is.
+    let mut from = 0;
+    while let Some(k) = html[from..].find("<![") {
+        let i = from + k;
+        if starts_with_ci(&html.as_bytes()[i + 3..], b"cdata[") {
+            return Err(ArtifactError::Forbidden("a CDATA section", i));
+        }
+        from = i + 3;
     }
     // Control bytes are not markup and not text a document needs.
     if let Some(i) = html
@@ -372,6 +381,34 @@ fn end_of_tag(html: &str, open: usize, mut i: usize) -> Result<usize, ArtifactEr
 
 #[cfg(test)]
 mod tests {
+    /// The CDATA rule, which had no test before the scan behind it changed.
+    ///
+    /// `<![` is what the scan looks for and `cdata[` is what it then confirms,
+    /// so the cases that matter are the spelling, the case folding, and a `<![`
+    /// that begins no CDATA section at all.
+    #[test]
+    fn a_cdata_section_is_refused_however_it_is_spelled() {
+        for body in ["<![CDATA[x]]>", "<![cdata[x]]>", "<![CdAtA[x]]>"] {
+            assert!(
+                matches!(
+                    refuse_hostile_bytes(body),
+                    Err(ArtifactError::Forbidden("a CDATA section", _))
+                ),
+                "{body} must be refused as CDATA"
+            );
+        }
+    }
+
+    /// A `<![` the scan steps over rather than stopping on, and one that
+    /// follows it -- the loop must keep looking after a near miss.
+    #[test]
+    fn a_bracket_that_opens_no_cdata_does_not_stop_the_scan() {
+        assert!(refuse_hostile_bytes("<![notcdata[x").is_ok());
+        assert!(matches!(
+            refuse_hostile_bytes("<![nope[ then <![CDATA[x"),
+            Err(ArtifactError::Forbidden("a CDATA section", _))
+        ));
+    }
 
     /// A localised artifact must be REFUSED, not panic the process.
     ///
