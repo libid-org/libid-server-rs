@@ -48,12 +48,18 @@ pub struct GithubExchange {
     /// names no host or no port stops the process from coming up rather than
     /// failing the first ceremony that reaches it.
     pub(crate) notary_addr: String,
-    /// The origins admitted to call the token route.
+    /// The CCDP Distribution this bridge selects, and the ONLY origin the
+    /// token route admits.
     ///
-    /// The same effective set every other gated surface uses, shared with
-    /// [`AppState`] rather than copied: one list built once, so the two cannot
-    /// come to disagree about who is admitted.
-    pub(crate) allowed_origins: Arc<[String]>,
+    /// Deliberately narrower than the effective set the configuration route
+    /// uses. The caller here is the Prover, which runs on this origin and
+    /// nowhere else, so admitting an application origin would widen the one
+    /// route that spends the client secret for no caller that exists. It is
+    /// not caller authentication either way -- a request with no browser
+    /// behind it carries whatever `Origin` it likes -- so this is the browser
+    /// boundary only, and the destination and egress safeguards are what
+    /// stand behind it.
+    pub(crate) ccdp_origin: String,
     /// How many exchanges may run at once.
     ///
     /// This is the only thing standing between an anonymous caller and as many

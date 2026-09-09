@@ -57,7 +57,7 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
 | `GET` | `/api/v1/ceremony/config` | The public ceremony configuration. Readable only from an admitted origin. |
 | `GET` | `{CALLBACK_PATH}` (default `/auth/callback`) | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
-| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin, whose preflight it answers. `403` for any other origin, `400` for a query, `415` for any media type but exactly `application/json`, in that order. |
+| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin — narrower than `/config`, which admits the whole allowlist — and it answers that origin's preflight. The body carries `notaryAddress`, which must name the notary this deployment serves. `403` for any other origin or notary, `400` for a query, `415` for any media type but exactly `application/json`. |
 
 The contract's route surface is closed — "the bridge exposes only" the last
 three — so `/health` is a deliberate deviation, kept because the published
@@ -151,12 +151,19 @@ request, and there is no request-logging middleware. **Any proxy in front of
 this server must redact the callback path's query string from its access
 logs** — that half of the contract is the operator's.
 
-Today the artifact is **compiled into the binary** (`src/artifact/callback.html`)
-rather than fetched. That floor is deliberately not a working Callback: it
+The artifact comes from `CALLBACK_ARTIFACT_PATH`, or from the binary when that
+is unset. Both go through the same validation and the same composition — where
+the bytes came from changes what is logged and nothing else, because a supplied
+artifact is not more trusted than a compiled-in one.
+
+The compiled-in one is a **floor**, deliberately not a working Callback: it
 clears the OAuth return, renders fixed text and completes no ceremony, and the
-process says so loudly at startup. It exists so the bridge always has a valid
-document to serve — the contract's "inert unavailable response" has no
-representation here. **Vendor a real artifact before running a deployment.**
+process warns on every start while it is serving. It exists so the bridge always
+has a valid document — the contract's "inert unavailable response" has no
+representation here. **Set `CALLBACK_ARTIFACT_PATH` to run real ceremonies.**
+
+The bridge does not fetch the artifact itself yet; obtaining it from the
+Distribution is the deployment's job.
 
 ## What the operator has to supply
 
@@ -187,6 +194,7 @@ All settings come from environment variables (or the matching `--flag`).
 | `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once, and it governs the configuration route, the token route and what the callback document is told. |
 | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
 | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
+| `CALLBACK_ARTIFACT_PATH` | *(empty)* | A `callback.html` obtained from the CCDP Distribution, served instead of the compiled-in floor. Read once at startup and held to the same shape either way. **Unset means the floor, which completes no ceremony** — set this to run real ceremonies. |
 | `CEREMONY_PLATFORMS` | *(required)* | The enabled platforms as JSON — see below. |
 | `NOTARY_URL` | `tcp://127.0.0.1:7047` | The notary server's TCP endpoint. |
 | `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret. Required exactly when `CEREMONY_PLATFORMS` enables `github`, and refused otherwise. |

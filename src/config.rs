@@ -72,6 +72,19 @@ pub struct Config {
     #[arg(long, env = "CCDP_ORIGIN", default_value = "https://lib.id")]
     pub ccdp_origin: String,
 
+    /// A Callback artifact to serve instead of the compiled-in floor.
+    ///
+    /// The path to a `callback.html` this deployment has already obtained from
+    /// its CCDP Distribution. Read once at startup, then validated and
+    /// configured exactly as the compiled-in one is -- the only difference is
+    /// where the bytes came from.
+    ///
+    /// Unset means the floor, which clears the OAuth return, renders fixed text
+    /// and completes no ceremony. A deployment meaning to serve real ceremonies
+    /// sets this.
+    #[arg(long, env = "CALLBACK_ARTIFACT_PATH", default_value = "")]
+    pub callback_artifact_path: String,
+
     /// The enabled platforms, as JSON. One record per platform, each with its
     /// public client id and its advertised ceremony versions:
     ///
@@ -122,6 +135,7 @@ impl std::fmt::Debug for Config {
             .field("allowed_app_origins", &self.allowed_app_origins)
             .field("callback_path", &self.callback_path)
             .field("ccdp_origin", &self.ccdp_origin)
+            .field("callback_artifact_path", &self.callback_artifact_path)
             .field("ceremony_platforms", &self.ceremony_platforms)
             .field("gh_oauth_client_secret", &"<redacted>")
             .finish()

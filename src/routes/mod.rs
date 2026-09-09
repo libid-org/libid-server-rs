@@ -144,7 +144,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 // surface: "unsupported methods fail without route work".
                 // `route_layer` runs only where a route matched, which is this
                 // path and nothing else.
-                .route_layer(token_cors(&github.allowed_origins))
+                .route_layer(token_cors(&github.ccdp_origin))
                 .with_state(github.clone()),
         );
     }
@@ -160,24 +160,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 ///
 /// The preflight admits `POST` and `Content-Type` and no credentials, and
 /// carries no ceremony data: it is an answer about policy, not a response.
-fn token_cors(allowed: &[String]) -> CorsLayer {
-    // The WHOLE effective set, not just the CCDP origin. The handler admits
-    // every member, and a layer that echoed one of them would let a configured
-    // application origin past the gate and then have the browser discard the
-    // answer for want of a matching allow-origin header -- a failure with no
-    // server-side symptom at all.
-    //
-    // A member that is not a header value is dropped rather than widening the
-    // list; `canonical_origin` already guarantees none is, so the filter is
-    // what makes that guarantee unnecessary to trust here.
-    let origins = AllowOrigin::list(
-        allowed
-            .iter()
-            .filter_map(|o| HeaderValue::from_str(o).ok())
-            .collect::<Vec<_>>(),
-    );
+fn token_cors(ccdp_origin: &str) -> CorsLayer {
+    // Exactly what the handler admits, and nothing more. The two are the same
+    // rule seen from two places: a layer wider than the gate would advertise
+    // access this route then refuses, and one narrower would let a caller past
+    // the gate and have the browser discard the answer for want of a matching
+    // allow-origin header -- a failure with no server-side symptom at all.
+    let origin = HeaderValue::from_str(ccdp_origin)
+        .map(|v| AllowOrigin::list([v]))
+        .unwrap_or_else(|_| AllowOrigin::list([]));
     CorsLayer::new()
-        .allow_origin(origins)
+        .allow_origin(origin)
         .allow_methods([axum::http::Method::POST])
         .allow_headers([axum::http::header::CONTENT_TYPE])
 }

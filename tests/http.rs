@@ -126,8 +126,15 @@ async fn post_token(origin: Option<&str>, body: String) -> axum::response::Respo
         .unwrap()
 }
 
+/// The notary the fixture's `--notary-url tcp://127.0.0.1:7047` serves, spelled
+/// as a request carries it: a canonical HTTPS origin. The two are compared as
+/// `host:port`, which is what makes those two spellings one notary.
+const NOTARY: &str = "https://127.0.0.1:7047";
+
 fn valid_body() -> String {
-    format!(r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#)
+    format!(
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{NOTARY}"}}"#
+    )
 }
 
 #[tokio::test]
@@ -231,14 +238,14 @@ async fn github_token_refuses_a_body_carrying_a_schema() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// The preflight admits every member of the effective set and nothing else.
+/// The preflight admits exactly what the handler does.
 ///
-/// The handler admits the whole set, so a layer echoing only the CCDP origin
-/// would let a configured application origin past the gate and then have the
-/// browser discard the answer for want of a matching allow-origin header --
-/// a failure with no server-side symptom at all.
+/// The two are one rule seen from two places: a layer wider than the gate
+/// advertises access this route then refuses, and one narrower lets a caller
+/// past the gate and has the browser discard the answer for want of a matching
+/// allow-origin header -- a failure with no server-side symptom at all.
 #[tokio::test]
-async fn the_token_preflight_admits_the_effective_set_and_no_other() {
+async fn the_token_preflight_admits_exactly_what_the_handler_does() {
     let preflight = |origin: &'static str| async move {
         app(test_state())
             .oneshot(
@@ -254,27 +261,30 @@ async fn the_token_preflight_admits_the_effective_set_and_no_other() {
             .unwrap()
     };
 
-    for origin in [ORIGIN, APP_ORIGIN, "https://wallet.example"] {
-        let resp = preflight(origin).await;
-        assert_eq!(resp.status(), StatusCode::OK, "{origin}");
-        let h = resp.headers();
-        assert_eq!(h.get("access-control-allow-origin").unwrap(), origin);
-        assert_eq!(h.get("access-control-allow-methods").unwrap(), "POST");
-        assert_eq!(
-            h.get("access-control-allow-headers").unwrap(),
-            "content-type"
-        );
-        // Noncredentialed, and it carries no ceremony data.
-        assert!(h.get("access-control-allow-credentials").is_none());
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert!(body.is_empty(), "{origin} got a body");
-    }
+    let resp = preflight(ORIGIN).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let h = resp.headers();
+    assert_eq!(h.get("access-control-allow-origin").unwrap(), ORIGIN);
+    assert_eq!(h.get("access-control-allow-methods").unwrap(), "POST");
+    assert_eq!(
+        h.get("access-control-allow-headers").unwrap(),
+        "content-type"
+    );
+    assert!(h.get("access-control-allow-credentials").is_none());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty(), "a preflight carries no ceremony data");
 
-    // Anything outside the set gets no allow-origin header at all: the layer
-    // filters rather than announcing a value and leaving the refusal to the
-    // browser.
-    let resp = preflight("https://evil.example").await;
-    assert!(resp.headers().get("access-control-allow-origin").is_none());
+    // Everything else gets no allow-origin header at all: the layer filters
+    // rather than announcing a value and leaving the refusal to the browser.
+    // An application origin is refused here and admitted on `/config`, which is
+    // the difference between the two rules.
+    for other in [APP_ORIGIN, "https://wallet.example", "https://evil.example"] {
+        let resp = preflight(other).await;
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "{other}"
+        );
+    }
 }
 
 /// The origin gate on the POST is the CCDP origin, and specifically NOT this
@@ -761,18 +771,79 @@ async fn github_token_takes_exactly_one_media_type() {
     }
 }
 
-/// One valid `Origin`, a member of the effective admission set, on every
-/// request.
-///
-/// The ceremony's caller is the Prover on the CCDP origin, but the contract
-/// makes this route use the same `allowedOrigins` rule as configuration and
-/// Callback -- so a configured application origin is admitted here too, and
-/// the CCDP origin is in the set whether or not anybody listed it.
+/// The Prover resolves one notary address and uses it for both sessions, so it
+/// travels in the request. This bridge does not dial what a caller names: it
+/// checks the request names the notary it already serves, and refuses
+/// otherwise -- so nothing caller-supplied reaches a socket.
 #[tokio::test]
-async fn github_token_admits_one_origin_from_the_effective_set() {
+async fn github_token_requires_the_notary_it_serves() {
+    // Spelled differently from `--notary-url`, and the same notary: the request
+    // carries an HTTPS origin, the bridge dials a TCP endpoint, and `host:port`
+    // is what they agree on.
+    let resp = post_token(Some(ORIGIN), valid_body()).await;
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "the notary this deployment serves must be admitted"
+    );
+
+    // A different notary is refused, and refused as such.
+    for other in [
+        "https://notary.lib.id",
+        "https://testnet.notary.lib.id",
+        "https://127.0.0.1:9999",
+    ] {
+        let body = format!(
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{other}"}}"#
+        );
+        let resp = post_token(Some(ORIGIN), body).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{other}");
+    }
+}
+
+/// A caller does not get to name a plaintext destination, a path, a credential
+/// or anything else that is not a bare HTTPS origin.
+#[tokio::test]
+async fn github_token_refuses_a_notary_address_that_is_not_a_bare_https_origin() {
+    for bad in [
+        "http://127.0.0.1:7047",
+        "127.0.0.1:7047",
+        "https://127.0.0.1:7047/path",
+        "https://127.0.0.1:7047?q=1",
+        "https://user:pw@127.0.0.1:7047",
+        "https://a;b.example",
+        "not a url",
+        "",
+    ] {
+        let body = format!(
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{bad}"}}"#
+        );
+        let resp = post_token(Some(ORIGIN), body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad:?}");
+    }
+}
+
+/// The field is required: the contract makes it part of the request, and
+/// `deny_unknown_fields` cuts both ways -- a body without it is not a
+/// `TokenRequest`.
+#[tokio::test]
+async fn github_token_refuses_a_body_without_a_notary_address() {
+    let body = format!(r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#);
+    let resp = post_token(Some(ORIGIN), body).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// One valid `Origin`, exactly the configured CCDP origin, on every request.
+///
+/// Narrower than the configuration route on purpose: the caller here is the
+/// Prover, which runs on that origin and nowhere else, so admitting an
+/// application origin would widen the one route that spends the client secret
+/// for no caller that exists.
+#[tokio::test]
+async fn github_token_admits_the_ccdp_origin_and_nothing_else() {
     // A body the NEXT check refuses, so admission is proved without opening a
     // notary session.
-    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
+    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort","notaryAddress":"https://127.0.0.1:7047"}"#;
     let post = |origins: Vec<&'static str>| async move {
         let mut req = Request::post("/api/v1/ceremony/github-token")
             .header("content-type", "application/json");
@@ -786,17 +857,16 @@ async fn github_token_admits_one_origin_from_the_effective_set() {
             .status()
     };
 
-    // The CCDP origin, and both configured application origins.
-    for origin in [ORIGIN, APP_ORIGIN, "https://wallet.example"] {
-        assert_eq!(
-            post(vec![origin]).await,
-            StatusCode::BAD_REQUEST,
-            "{origin}"
-        );
-    }
+    assert_eq!(
+        post(vec![ORIGIN]).await,
+        StatusCode::BAD_REQUEST,
+        "the CCDP origin"
+    );
 
-    // Everything outside the set, and the shapes that are not one origin.
     for origins in [
+        // Admitted to read the configuration, and that grants nothing here.
+        vec![APP_ORIGIN],
+        vec!["https://wallet.example"],
         vec!["https://evil.example"],
         vec!["null"],
         vec!["not a url"],

@@ -97,7 +97,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                     redirect_uri: redirect_uri.clone(),
                 },
                 notary_addr: notary_addr(&cfg.notary_url)?,
-                allowed_origins: Arc::clone(&allowed_origins),
+                ccdp_origin: ccdp_origin.clone(),
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
         }
@@ -124,7 +124,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             &ccdp_origin,
             &platforms,
         ),
-        callback: callback_document(&ccdp_origin, &allowed_origins)?,
+        callback: callback_document(cfg, &ccdp_origin, &allowed_origins)?,
         admits_same_origin_config: allowed_origins.iter().any(|o| o == &server_origin),
         allowed_origins,
         callback_path,
@@ -134,36 +134,64 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 
 /// Configure the callback document this deployment serves.
 ///
-/// The compiled-in artifact, which is a floor and not a working Callback: a
-/// deployment running on it answers the registered redirect URI with a document
-/// that clears the credential and stops. It is loud about that, because the
-/// alternative is a deployment that looks healthy and completes no ceremony.
+/// The artifact is whatever `CALLBACK_ARTIFACT_PATH` names, or the compiled-in
+/// floor when it names nothing. Both go through the same validation and the
+/// same composition: where the bytes came from changes what is logged and
+/// nothing else, because a supplied artifact is not more trusted than an
+/// embedded one -- it is read, held to the same shape, and hashed by this
+/// service either way.
 ///
-/// It is composed at startup rather than fetched, so the process binds without
+/// It is read at startup rather than fetched, so the process binds without
 /// reaching the network and no request can arrive at a route with nothing to
 /// answer -- which is why the contract's "inert unavailable response" has no
 /// representation here.
 fn callback_document(
+    cfg: &config::Config,
     ccdp_origin: &str,
     allowed_origins: &[String],
 ) -> Result<artifact::CallbackDocument> {
+    let path = cfg.callback_artifact_path.trim();
+    let (html, source) = if path.is_empty() {
+        (artifact::EMBEDDED.to_owned(), artifact::Source::Embedded)
+    } else {
+        let read = std::fs::read_to_string(path).map_err(|e| Error::Config {
+            detail: format!("CALLBACK_ARTIFACT_PATH {path}: {e}"),
+        })?;
+        (read, artifact::Source::Supplied)
+    };
+
     let document = artifact::compose(
-        artifact::EMBEDDED,
+        &html,
         &artifact::DeploymentInputs {
             ccdp_origin,
             allowed_origins,
         },
+        source,
     )
     .map_err(|e| Error::Config {
-        detail: format!("the compiled-in callback artifact is not serveable: {e}"),
+        detail: match source {
+            artifact::Source::Embedded => {
+                format!("the compiled-in callback artifact is not serveable: {e}")
+            }
+            artifact::Source::Supplied => {
+                format!("CALLBACK_ARTIFACT_PATH {path} is not serveable: {e}")
+            }
+        },
     })?;
-    // Unconditional, because there is one source. When the bridge can fetch a
-    // newer artifact this becomes the branch that fires only for the floor.
-    tracing::warn!(
-        "serving the COMPILED-IN callback artifact: it clears the OAuth return \
-         and renders fixed text, and completes no ceremony. Vendor a real \
-         artifact from the CCDP Distribution before running this deployment."
-    );
+
+    // Read off the composed document rather than the local, so the field the
+    // rest of the process would consult is the one this line reports.
+    match document.source {
+        artifact::Source::Embedded => tracing::warn!(
+            "serving the COMPILED-IN callback artifact: it clears the OAuth return \
+             and renders fixed text, and completes no ceremony. Set \
+             CALLBACK_ARTIFACT_PATH to a callback.html from the CCDP \
+             Distribution before running this deployment."
+        ),
+        artifact::Source::Supplied => {
+            tracing::info!(path, "serving the configured callback artifact")
+        }
+    }
     Ok(document)
 }
 

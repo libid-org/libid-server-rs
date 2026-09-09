@@ -160,6 +160,13 @@ pub(crate) struct TokenRequestBody {
     code: String,
     /// The PKCE verifier the browser derived for this ceremony.
     code_verifier: String,
+    /// The Notary Service origin the Prover already resolved.
+    ///
+    /// It travels in the request rather than being configured because one
+    /// resolution has to serve both sessions: a bridge that re-derived it could
+    /// disagree with the browser about which notary signed, and the two
+    /// attestations would then name different services.
+    notary_address: String,
 }
 
 /// The notary's attestation of the exchange: the exact bytes it signed, and
@@ -324,21 +331,24 @@ pub(crate) async fn github_token(
     // whatever `Origin` it likes — it stops a page on another origin from
     // spending this bridge's secret through someone else's browser.
     //
-    // Exactly one, and a member of the effective admission set. The ceremony's
-    // caller here is the Prover on the CCDP origin, but the contract makes this
-    // route use "the same `allowedOrigins` rule as configuration and Callback",
-    // so a configured application origin is admitted too. Missing, `null`,
-    // malformed, repeated and unlisted all fail, and the counting is shared
-    // with the configuration route so the two cannot drift.
+    // Exactly one, and exactly the configured CCDP origin -- NOT the effective
+    // set the configuration route admits. The caller here is the Prover, which
+    // runs on that origin and nowhere else, so admitting an application origin
+    // would widen the one route that spends the client secret for no caller
+    // that exists.
+    //
+    // Missing, `null`, malformed and repeated all fail, and the counting is
+    // shared with the configuration route so the two cannot drift on the part
+    // they do agree about.
     let admitted = matches!(
         crate::routes::origins(&headers),
         crate::routes::Origins::One(origin)
-            if origin.to_str().is_ok_and(|o| github.allowed_origins.iter().any(|a| a == o))
+            if origin.as_bytes() == github.ccdp_origin.as_bytes()
     );
     if !admitted {
         return Err(TokenError {
             status: StatusCode::FORBIDDEN,
-            message: "this route is callable only from an admitted origin".into(),
+            message: "this route is callable only from the configured CCDP origin".into(),
         });
     }
 
@@ -398,6 +408,34 @@ pub(crate) async fn github_token(
             message: "the request body is not a TokenRequest".into(),
         }
     })?;
+    // The notary the Prover resolved must be the one this deployment serves.
+    //
+    // The contract makes this destination request-controlled and leaves egress
+    // safeguards to carry the weight. This bridge does not dial a
+    // caller-supplied host at all: it checks the request names the notary it is
+    // already configured for, and refuses otherwise. Nothing caller-chosen ever
+    // reaches a socket, so the SSRF surface the contract warns about does not
+    // open here -- and when the transport moves to `wss://{notaryAddress}` the
+    // configured value is what disappears, not this check.
+    //
+    // Compared as `host:port`, because the two spell the same service
+    // differently: the request carries an HTTPS origin and this bridge dials
+    // the notary's own TCP endpoint.
+    let asked = canonical_notary(&body.notary_address).ok_or_else(|| {
+        TokenError::bad_request("notaryAddress is not a canonical HTTPS origin")
+    })?;
+    if asked != github.notary_addr {
+        tracing::warn!(
+            asked = %asked,
+            serves = %github.notary_addr,
+            "refused a token request naming a notary this deployment does not serve"
+        );
+        return Err(TokenError {
+            status: StatusCode::FORBIDDEN,
+            message: "this bridge does not serve the notary this request names".into(),
+        });
+    }
+
     let request = TokenRequest {
         code: body.code,
         code_verifier: body.code_verifier,
@@ -446,6 +484,34 @@ pub(crate) async fn github_token(
         }),
     )
         .into_response())
+}
+
+/// The `host:port` a canonical HTTPS notary origin names, or `None`.
+///
+/// Deliberately narrow, because this value arrives in a request: HTTPS only, no
+/// credentials, path, query or fragment, and a host whose bytes are what a host
+/// is made of. It is the same shape [`crate::canonical_origin`] holds a
+/// configured origin to, minus that function's development exception for
+/// loopback `http` -- a caller does not get to name a plaintext destination.
+fn canonical_notary(spelling: &str) -> Option<String> {
+    let url = url::Url::parse(spelling).ok()?;
+    if url.scheme() != "https"
+        || !matches!(url.path(), "" | "/")
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    let host = url.host_str()?;
+    if !host
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-_.:[]".contains(&b))
+    {
+        return None;
+    }
+    Some(format!("{host}:{}", url.port_or_known_default()?))
 }
 
 /// How every byte string in the response is spelled: unpadded URL-safe base64.

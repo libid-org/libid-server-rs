@@ -56,6 +56,21 @@ pub(crate) struct DeploymentInputs<'a> {
     pub(crate) allowed_origins: &'a [String],
 }
 
+/// Where the served artifact came from. It decides what is logged and nothing
+/// else: a supplied artifact is not more trusted than an embedded one -- both
+/// are read, held to the same shape, and hashed by this service.
+///
+/// Stated by the caller, never inferred. A `const` is inlined at each use, so
+/// two references to [`EMBEDDED`] need not share an address and a pointer
+/// comparison would answer whatever the optimiser felt like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// The compiled-in floor: valid, and not a working Callback.
+    Embedded,
+    /// A file this deployment supplied.
+    Supplied,
+}
+
 /// The finished document: the exact bytes, and the policy they are served
 /// under.
 pub(crate) struct CallbackDocument {
@@ -66,6 +81,8 @@ pub(crate) struct CallbackDocument {
     /// actually carries. Parsed into a header value here, so no request pays
     /// for -- or can fail -- that parse.
     pub(crate) csp: HeaderValue,
+    /// Where the bytes came from.
+    pub(crate) source: Source,
 }
 
 /// Configure one artifact and compose the response it is served as.
@@ -77,6 +94,7 @@ pub(crate) struct CallbackDocument {
 pub(crate) fn compose(
     html: &str,
     inputs: &DeploymentInputs<'_>,
+    source: Source,
 ) -> Result<CallbackDocument, ArtifactError> {
     let layout = scan(html)?;
     // The marker rule, which belongs to insertion rather than to reading a
@@ -125,6 +143,7 @@ pub(crate) fn compose(
     Ok(CallbackDocument {
         body: Bytes::from(body),
         csp,
+        source,
     })
 }
 
@@ -215,6 +234,7 @@ mod tests {
                 ccdp_origin: "https://ccdp.example",
                 allowed_origins: origins,
             },
+            Source::Embedded,
         )
         .expect("composes")
     }
@@ -333,6 +353,7 @@ mod tests {
                     ccdp_origin: "https://ccdp.example",
                     allowed_origins: &origins(),
                 },
+                Source::Embedded,
             ),
             Err(scan::ArtifactError::Marker)
         ));
@@ -351,6 +372,7 @@ mod tests {
                     ccdp_origin: "https://ccdp.example",
                     allowed_origins: &origins(),
                 },
+                Source::Embedded,
             ),
             Err(scan::ArtifactError::Marker)
         ));
