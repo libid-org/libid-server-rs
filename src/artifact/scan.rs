@@ -155,6 +155,30 @@ impl Layout {
     }
 }
 
+/// Case-insensitive prefix test that allocates nothing.
+///
+/// The whole reason both of these exist: every case-insensitive comparison in
+/// this module used to materialise a lowercase copy of whatever it was about
+/// to search. For a prefix test that copied the entire remaining document to
+/// look at ten bytes, and inside the foreign-content walk it copied the tail
+/// once per element, which is quadratic on a document this bridge does not
+/// author. Comparing in place is also the more honest statement: the needle is
+/// ASCII and the haystack is bytes, and neither needs a new allocation to say
+/// whether one starts the other.
+fn starts_with_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .get(..needle.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(needle))
+}
+
+/// Case-insensitive search that allocates nothing, as a byte offset into
+/// `haystack`. `needle` must be nonempty, which every caller's is a literal.
+fn find_ci(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle))
+}
+
 /// Bytes that make the rest of this reader unsound, refused before anything
 /// else looks at the document.
 fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
@@ -180,14 +204,12 @@ fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
     // `<svg` and `<math` are NOT here: the artifact carries an inline logo, so
     // they are stepped over by `foreign_subtree` and refused only if one holds
     // a `<script`.
-    let lower = html.to_ascii_lowercase();
-    for (needle, what) in [
-        ("<![cdata[", "a CDATA section"),
-        ("<?", "a processing instruction"),
-    ] {
-        if let Some(i) = lower.find(needle) {
-            return Err(ArtifactError::Forbidden(what, i));
-        }
+    // `<?` carries no letter, so it needs no case folding and no copy.
+    if let Some(i) = html.find("<?") {
+        return Err(ArtifactError::Forbidden("a processing instruction", i));
+    }
+    if let Some(i) = find_ci(html.as_bytes(), b"<![cdata[") {
+        return Err(ArtifactError::Forbidden("a CDATA section", i));
     }
     // Control bytes are not markup and not text a document needs.
     if let Some(i) = html
@@ -230,12 +252,13 @@ fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactErr
     }
 
     // Otherwise walk to the matching close, counting nesting.
-    let lower = html[tag_end..].to_ascii_lowercase();
+    let tail = &html.as_bytes()[tag_end..];
     let (o, c) = (format!("<{name}"), format!("</{name}"));
+    let (o, c) = (o.as_bytes(), c.as_bytes());
     let (mut depth, mut i) = (1usize, 0usize);
     while depth > 0 {
-        let next_open = lower[i..].find(&o).map(|k| i + k);
-        let Some(next_close) = lower[i..].find(&c).map(|k| i + k) else {
+        let next_open = find_ci(&tail[i..], o).map(|k| i + k);
+        let Some(next_close) = find_ci(&tail[i..], c).map(|k| i + k) else {
             return Err(ArtifactError::Malformed(open));
         };
         match next_open {
@@ -250,7 +273,7 @@ fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactErr
         }
     }
     let end = end_of_tag(html, open, tag_end + i)?;
-    if lower[..i].contains("<script") {
+    if find_ci(&tail[..i], b"<script").is_some() {
         return Err(ArtifactError::Forbidden(
             "a script inside foreign content",
             open,
@@ -272,7 +295,7 @@ fn close_of(html: &str, text_start: usize) -> Result<usize, ArtifactError> {
         // the first thing that resembles it.
         Some(i) => {
             let end = text_start + i;
-            match tail[..i].to_ascii_lowercase().find("</script") {
+            match find_ci(&tail.as_bytes()[..i], b"</script") {
                 None => Ok(end),
                 Some(j) => Err(ArtifactError::Malformed(text_start + j)),
             }
@@ -297,7 +320,7 @@ fn ordinary_tag(html: &str, open: usize) -> Result<usize, ArtifactError> {
     // `<!doctype html>` is the one `<!` this reader admits; `<!--` was already
     // refused above.
     if bytes[i] == b'!' {
-        if !html[open..].to_ascii_lowercase().starts_with("<!doctype ") {
+        if !starts_with_ci(&bytes[open..], b"<!doctype ") {
             return Err(ArtifactError::Malformed(open));
         }
         return end_of_tag(html, open, i);
@@ -349,6 +372,7 @@ fn end_of_tag(html: &str, open: usize, mut i: usize) -> Result<usize, ArtifactEr
 
 #[cfg(test)]
 mod tests {
+
     /// A localised artifact must be REFUSED, not panic the process.
     ///
     /// Every one of these puts a multi-byte character at the byte index the
