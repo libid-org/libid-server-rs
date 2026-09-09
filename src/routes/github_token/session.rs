@@ -9,7 +9,7 @@
 //! This is also where a layout refusal becomes a session failure -- the driver
 //! speaks its own error vocabulary, and `layout_failed` is the one place a
 //! transcript's refusal is restated in it, so `transcript` need not know the
-//! driver exists.
+//! driver's error type.
 
 use std::{
     ops::Range,
