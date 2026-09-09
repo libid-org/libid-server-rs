@@ -119,8 +119,10 @@ impl Layout {
                 // inline logo, so refusing SVG outright would refuse every real
                 // artifact -- and it would do so late, after vendoring.
                 at = after;
-            } else if rest.len() > 7
-                && rest.as_bytes()[1..7].eq_ignore_ascii_case(b"script")
+            } else if rest
+                .as_bytes()
+                .get(1..7)
+                .is_some_and(|t| t.eq_ignore_ascii_case(b"script"))
             {
                 // Any other script element: a `src`, a nonce, a classic script, an
                 // attribute in another order. Each is a shape this bridge has not
@@ -215,8 +217,9 @@ fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactErr
         // not this bridge's to author, so a localised one must be refused with
         // an error naming the setting, never abort the process.
         .find(|n| {
-            rest.len() > n.len() + 1
-                && rest.as_bytes()[1..=n.len()].eq_ignore_ascii_case(n.as_bytes())
+            rest.as_bytes()
+                .get(1..=n.len())
+                .is_some_and(|t| t.eq_ignore_ascii_case(n.as_bytes()))
         });
     let Some(name) = name else { return Ok(None) };
 
