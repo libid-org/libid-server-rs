@@ -68,7 +68,7 @@ enum Admitted {
 /// `Referer` nor the request host is consulted: both are shaped by the caller,
 /// and this function does not read them.
 fn admit(state: &AppState, headers: &HeaderMap) -> Option<Admitted> {
-    let admitted = |o: &str| state.allowed_app_origins.iter().any(|a| a == o);
+    let admitted = |o: &str| state.allowed_origins.iter().any(|a| a == o);
 
     match crate::routes::origins(headers) {
         // Present and exact, or refused. `null`, a malformed value and an
@@ -106,7 +106,7 @@ pub(crate) async fn config(
     let Some(admitted) = admit(&state, &headers) else {
         return refuse(
             StatusCode::FORBIDDEN,
-            "this configuration is readable only from an admitted application origin",
+            "this configuration is readable only from an admitted origin",
         );
     };
 

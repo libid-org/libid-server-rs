@@ -51,8 +51,9 @@ pub(crate) struct DeploymentInputs<'a> {
     /// The CCDP Distribution this bridge selects. Travels in the inserted list
     /// and is the only origin the policy admits a frame from.
     pub(crate) ccdp_origin: &'a str,
-    /// The application origins the Callback authenticates against.
-    pub(crate) allowed_app_origins: &'a [String],
+    /// The bridge's effective admission set, which the Callback authenticates
+    /// an application against. It contains the CCDP origin by construction.
+    pub(crate) allowed_origins: &'a [String],
 }
 
 /// The finished document: the exact bytes, and the policy they are served
@@ -93,7 +94,7 @@ pub(crate) fn compose(
     // validated and published. The contract: "no version-keyed wrapper,
     // input-declaration block, or Bridge-side CCDP version list", and every
     // bundled implementation receives the same list.
-    let record = serde_json::json!([inputs.allowed_app_origins, inputs.ccdp_origin]);
+    let record = serde_json::json!([inputs.allowed_origins, inputs.ccdp_origin]);
     let mut body = String::with_capacity(html.len());
     body.push_str(&html[..layout.slot.start]);
     body.push_str(&json(&record));
@@ -199,8 +200,12 @@ fn json(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    /// The effective admission set as `build_state` derives it: the configured
+    /// application origins with the resolved CCDP origin joined. `compose` is
+    /// handed the finished set rather than deriving it, so the fixture carries
+    /// the shape the contract's own example shows.
     fn origins() -> Vec<String> {
-        vec!["https://app.example".into()]
+        vec!["https://app.example".into(), "https://ccdp.example".into()]
     }
 
     fn composed(html: &str, origins: &[String]) -> CallbackDocument {
@@ -208,7 +213,7 @@ mod tests {
             html,
             &DeploymentInputs {
                 ccdp_origin: "https://ccdp.example",
-                allowed_app_origins: origins,
+                allowed_origins: origins,
             },
         )
         .expect("composes")
@@ -257,7 +262,7 @@ mod tests {
         let end = start + html[start..].find("</script>").unwrap();
         assert_eq!(
             &html[start..end],
-            r#"[["https://app.example"],"https://ccdp.example"]"#
+            r#"[["https://app.example","https://ccdp.example"],"https://ccdp.example"]"#
         );
         assert!(!html.contains(scan::MARKER), "the marker is consumed");
     }
@@ -326,7 +331,7 @@ mod tests {
                 &filled,
                 &DeploymentInputs {
                     ccdp_origin: "https://ccdp.example",
-                    allowed_app_origins: &origins(),
+                    allowed_origins: &origins(),
                 },
             ),
             Err(scan::ArtifactError::Marker)
@@ -344,7 +349,7 @@ mod tests {
                 &twice,
                 &DeploymentInputs {
                     ccdp_origin: "https://ccdp.example",
-                    allowed_app_origins: &origins(),
+                    allowed_origins: &origins(),
                 },
             ),
             Err(scan::ArtifactError::Marker)

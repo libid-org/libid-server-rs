@@ -55,7 +55,7 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
-| `GET` | `/api/v1/ceremony/config` | The public ceremony configuration. Readable only from an admitted application origin. |
+| `GET` | `/api/v1/ceremony/config` | The public ceremony configuration. Readable only from an admitted origin. |
 | `GET` | `{CALLBACK_PATH}` (default `/auth/callback`) | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
 | `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin, whose preflight it answers. `403` for any other origin, `400` for a query, `415` for any media type but exactly `application/json`, in that order. |
 
@@ -132,7 +132,8 @@ The bridge does not write it. The Distribution builds one self-contained
 artifact at `/ccdp/callback.html` carrying every supported Callback
 implementation, with one non-executable slot for deployment data. The bridge
 reads that artifact, substitutes **one unversioned list** —
-`[allowedAppOrigins, ccdpOrigin]`, both already validated for other reasons —
+`[allowedOrigins, ccdpOrigin]` — the effective admission set, which is
+`ALLOWED_APP_ORIGINS` plus the resolved CCDP origin, and that origin —
 into the slot, computes the response policy from the bytes it is about to
 serve, and publishes the pair. It parses no OAuth `state`, selects no CCDP
 version, and holds no version list: a compatible Callback change needs no
@@ -183,7 +184,7 @@ All settings come from environment variables (or the matching `--flag`).
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `PORT` | `8722` | Bind port. |
 | `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server, as a bare origin; HTTPS unless loopback. Every provider's registered callback URL must be exactly `{BASE_URL}{CALLBACK_PATH}`. |
-| `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins admitted to read the configuration. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. |
+| `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once, and it governs the configuration route, the token route and what the callback document is told. |
 | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
 | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `CEREMONY_PLATFORMS` | *(required)* | The enabled platforms as JSON — see below. |

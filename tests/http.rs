@@ -231,55 +231,50 @@ async fn github_token_refuses_a_body_carrying_a_schema() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// The prover runs on the CCDP Distribution and calls this route cross-origin,
-/// so the preflight is answered for that origin -- `POST`, `Content-Type`, no
-/// credentials, no ceremony data. Every other origin gets no allow-origin
-/// header at all: the layer filters rather than announcing a value and leaving
-/// the refusal to the browser.
+/// The preflight admits every member of the effective set and nothing else.
+///
+/// The handler admits the whole set, so a layer echoing only the CCDP origin
+/// would let a configured application origin past the gate and then have the
+/// browser discard the answer for want of a matching allow-origin header --
+/// a failure with no server-side symptom at all.
 #[tokio::test]
-async fn the_token_preflight_admits_the_ccdp_origin_and_no_other() {
-    for (origin, admitted) in [
-        (CCDP_ORIGIN, true),
-        ("http://127.0.0.1:8722", false),
-        ("https://evil.example", false),
-    ] {
-        let req = Request::builder()
-            .method("OPTIONS")
-            .uri("/api/v1/ceremony/github-token")
-            .header("origin", origin)
-            .header("access-control-request-method", "POST")
-            .header("access-control-request-headers", "content-type")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app(test_state()).oneshot(req).await.unwrap();
+async fn the_token_preflight_admits_the_effective_set_and_no_other() {
+    let preflight = |origin: &'static str| async move {
+        app(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/v1/ceremony/github-token")
+                    .header("origin", origin)
+                    .header("access-control-request-method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
+
+    for origin in [ORIGIN, APP_ORIGIN, "https://wallet.example"] {
+        let resp = preflight(origin).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{origin}");
         let h = resp.headers();
-        if admitted {
-            assert_eq!(h.get("access-control-allow-origin").unwrap(), CCDP_ORIGIN);
-            let methods = h
-                .get("access-control-allow-methods")
-                .unwrap()
-                .to_str()
-                .unwrap();
-            assert!(methods.contains("POST"), "{methods}");
-            let headers = h
-                .get("access-control-allow-headers")
-                .unwrap()
-                .to_str()
-                .unwrap();
-            assert!(
-                headers.to_ascii_lowercase().contains("content-type"),
-                "{headers}"
-            );
-            assert!(h.get("access-control-allow-credentials").is_none());
-        } else {
-            assert!(
-                h.get("access-control-allow-origin").is_none(),
-                "{origin} must get no allow-origin header"
-            );
-        }
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert!(bytes.is_empty(), "a preflight carries no ceremony data");
+        assert_eq!(h.get("access-control-allow-origin").unwrap(), origin);
+        assert_eq!(h.get("access-control-allow-methods").unwrap(), "POST");
+        assert_eq!(
+            h.get("access-control-allow-headers").unwrap(),
+            "content-type"
+        );
+        // Noncredentialed, and it carries no ceremony data.
+        assert!(h.get("access-control-allow-credentials").is_none());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty(), "{origin} got a body");
     }
+
+    // Anything outside the set gets no allow-origin header at all: the layer
+    // filters rather than announcing a value and leaving the refusal to the
+    // browser.
+    let resp = preflight("https://evil.example").await;
+    assert!(resp.headers().get("access-control-allow-origin").is_none());
 }
 
 /// The origin gate on the POST is the CCDP origin, and specifically NOT this
@@ -498,7 +493,7 @@ async fn config_varies_on_both_admission_headers() {
 
 /// The record carries exactly what the contract lists and nothing else.
 ///
-/// `allowedAppOrigins` is absent because the contract says the record contains
+/// The allowlist is absent because the contract says the record contains
 /// no such field -- not because the list is secret: the callback document
 /// carries
 /// it in a document served to anyone, and the Callback module needs it there.
@@ -766,54 +761,56 @@ async fn github_token_takes_exactly_one_media_type() {
     }
 }
 
-/// `ccdpOrigin` and nothing else, checked on every request.
+/// One valid `Origin`, a member of the effective admission set, on every
+/// request.
 ///
-/// The caller here is the Prover on the distribution, not the application, so
-/// an origin admitted to read the configuration is refused: the two lists are
-/// not unioned. Two `Origin` headers is not a request a browser sends, and
-/// taking the first would let the caller choose which one is read.
+/// The ceremony's caller is the Prover on the CCDP origin, but the contract
+/// makes this route use the same `allowedOrigins` rule as configuration and
+/// Callback -- so a configured application origin is admitted here too, and
+/// the CCDP origin is in the set whether or not anybody listed it.
 #[tokio::test]
-async fn github_token_admits_one_exact_ccdp_origin_and_nothing_else() {
-    // Admitted to `/config`, and that grants nothing here.
-    for origin in [APP_ORIGIN, "https://wallet.example", "null", "not a url"] {
-        let req = Request::post("/api/v1/ceremony/github-token")
-            .header("content-type", "application/json")
-            .header("origin", origin)
-            .body(Body::from(valid_body()))
-            .unwrap();
-        let resp = app(test_state()).oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{origin}");
+async fn github_token_admits_one_origin_from_the_effective_set() {
+    // A body the NEXT check refuses, so admission is proved without opening a
+    // notary session.
+    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
+    let post = |origins: Vec<&'static str>| async move {
+        let mut req = Request::post("/api/v1/ceremony/github-token")
+            .header("content-type", "application/json");
+        for origin in origins {
+            req = req.header("origin", origin);
+        }
+        app(test_state())
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+            .status()
+    };
+
+    // The CCDP origin, and both configured application origins.
+    for origin in [ORIGIN, APP_ORIGIN, "https://wallet.example"] {
+        assert_eq!(
+            post(vec![origin]).await,
+            StatusCode::BAD_REQUEST,
+            "{origin}"
+        );
     }
 
-    // The right origin twice is still two origins.
-    let req = Request::post("/api/v1/ceremony/github-token")
-        .header("content-type", "application/json")
-        .header("origin", ORIGIN)
-        .header("origin", ORIGIN)
-        .body(Body::from(valid_body()))
-        .unwrap();
-    let resp = app(test_state()).oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "a repeated Origin must not be admitted by reading the first"
-    );
-
-    // And the admitted origin with a body the next check refuses, so this
-    // proves admission without opening a notary session.
-    let req = Request::post("/api/v1/ceremony/github-token")
-        .header("content-type", "application/json")
-        .header("origin", ORIGIN)
-        .body(Body::from(
-            r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#,
-        ))
-        .unwrap();
-    let resp = app(test_state()).oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "admitted, then refused on the body"
-    );
+    // Everything outside the set, and the shapes that are not one origin.
+    for origins in [
+        vec!["https://evil.example"],
+        vec!["null"],
+        vec!["not a url"],
+        vec![],
+        // The right origin twice is still two origins.
+        vec![ORIGIN, ORIGIN],
+        vec![ORIGIN, "https://evil.example"],
+    ] {
+        assert_eq!(
+            post(origins.clone()).await,
+            StatusCode::FORBIDDEN,
+            "{origins:?}"
+        );
+    }
 }
 
 /// The token route's CORS layer covers the token route and nothing else.

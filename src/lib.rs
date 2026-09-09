@@ -62,6 +62,20 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
+    // One effective set, derived after the CCDP origin is resolved:
+    // `allowedAppOrigins ∪ {ccdpOrigin}`. The contract makes configuration
+    // reads, the callback connection and the token route one admission rule,
+    // so this is built once and shared rather than re-derived per surface.
+    // Adding an already-listed origin does not duplicate it, and only the
+    // RESOLVED origin joins -- a deployment that overrides `CCDP_ORIGIN` does
+    // not keep `https://lib.id` admitted unless it lists it.
+    let allowed_origins: Arc<[String]> = {
+        let mut set = allowed_app_origins.clone();
+        if !set.contains(&ccdp_origin) {
+            set.push(ccdp_origin.clone());
+        }
+        set.into()
+    };
     let platforms = deployment::platforms(&cfg.ceremony_platforms)?;
     // A constant that either always parses or never does, parsed here so a
     // build in which it does not fails at startup rather than on the first
@@ -83,7 +97,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                     redirect_uri: redirect_uri.clone(),
                 },
                 notary_addr: notary_addr(&cfg.notary_url)?,
-                ccdp_origin: ccdp_origin.clone(),
+                allowed_origins: Arc::clone(&allowed_origins),
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
         }
@@ -110,11 +124,9 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             &ccdp_origin,
             &platforms,
         ),
-        callback: callback_document(&ccdp_origin, &allowed_app_origins)?,
-        admits_same_origin_config: allowed_app_origins
-            .iter()
-            .any(|o| o == &server_origin),
-        allowed_app_origins,
+        callback: callback_document(&ccdp_origin, &allowed_origins)?,
+        admits_same_origin_config: allowed_origins.iter().any(|o| o == &server_origin),
+        allowed_origins,
         callback_path,
         github,
     }))
@@ -133,13 +145,13 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 /// representation here.
 fn callback_document(
     ccdp_origin: &str,
-    allowed_app_origins: &[String],
+    allowed_origins: &[String],
 ) -> Result<artifact::CallbackDocument> {
     let document = artifact::compose(
         artifact::EMBEDDED,
         &artifact::DeploymentInputs {
             ccdp_origin,
-            allowed_app_origins,
+            allowed_origins,
         },
     )
     .map_err(|e| Error::Config {
@@ -497,6 +509,39 @@ mod tests {
         ] {
             assert!(canonical_origin("T", spelling).is_err(), "{spelling}");
         }
+    }
+
+    /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`, derived after
+    /// the CCDP origin resolves -- so an omitted origin joins the default, an
+    /// overridden one joins only the replacement, and listing it twice does
+    /// not duplicate it.
+    #[test]
+    fn the_effective_admission_set_is_the_allowlist_plus_the_ccdp_origin() {
+        let origins = |args: &[&str]| -> Vec<String> {
+            build_state(&config(args)).unwrap().allowed_origins.to_vec()
+        };
+
+        // The default joins.
+        assert_eq!(
+            origins(&["--ccdp-origin", "https://lib.id"]),
+            ["https://app.example", "https://lib.id"]
+        );
+
+        // An override joins instead -- `lib.id` is not kept.
+        let overridden = origins(&["--ccdp-origin", "https://ccdp.example"]);
+        assert_eq!(overridden, ["https://app.example", "https://ccdp.example"]);
+        assert!(!overridden.iter().any(|o| o == "https://lib.id"));
+
+        // Already listed, and it is not added twice.
+        assert_eq!(
+            origins(&[
+                "--allowed-app-origins",
+                "https://app.example,https://ccdp.example",
+                "--ccdp-origin",
+                "https://ccdp.example",
+            ]),
+            ["https://app.example", "https://ccdp.example"]
+        );
     }
 
     /// An underscore is legal in a host, is a byte a browser sends unchanged,

@@ -48,9 +48,12 @@ pub struct GithubExchange {
     /// names no host or no port stops the process from coming up rather than
     /// failing the first ceremony that reaches it.
     pub(crate) notary_addr: String,
-    /// The CCDP Distribution this bridge selects. The token route admits this
-    /// origin and no other: the prover that calls it runs there.
-    pub(crate) ccdp_origin: String,
+    /// The origins admitted to call the token route.
+    ///
+    /// The same effective set every other gated surface uses, shared with
+    /// [`AppState`] rather than copied: one list built once, so the two cannot
+    /// come to disagree about who is admitted.
+    pub(crate) allowed_origins: Arc<[String]>,
     /// How many exchanges may run at once.
     ///
     /// This is the only thing standing between an anonymous caller and as many
@@ -73,18 +76,21 @@ pub struct AppState {
     /// `watch::Receiver`, and the handler's `.clone()` of two cheap fields
     /// becomes a `borrow().clone()` -- the route does not otherwise change.
     pub(crate) callback: crate::artifact::CallbackDocument,
-    /// Whether this bridge's own origin is one of the admitted application
-    /// origins.
+    /// Whether this bridge's own origin is one of the admitted origins.
     ///
     /// Decides one thing: whether a same-origin `GET` carrying no `Origin` may
     /// read the configuration. A deployment that does not admit itself has no
     /// same-origin application to admit, so the exception is closed for it.
     pub(crate) admits_same_origin_config: bool,
-    /// The application origins admitted to read the public configuration.
+    /// The effective admission set: `allowedAppOrigins ∪ {ccdpOrigin}`.
+    ///
+    /// One set, derived once, governing the configuration route, the token
+    /// route and what the callback document is told -- the contract makes it
+    /// one rule, and three copies of one rule is three things to keep in step.
     ///
     /// Exact strings, canonicalised at startup the same way this bridge's own
-    /// origin is, because the two are compared against what a browser sends.
-    pub(crate) allowed_app_origins: Vec<String>,
+    /// origin is, because they are compared against what a browser sends.
+    pub(crate) allowed_origins: Arc<[String]>,
     /// The public ceremony configuration, serialized once, as the exact bytes
     /// every admitted caller receives.
     ///

@@ -305,23 +305,21 @@ pub(crate) async fn github_token(
     // whatever `Origin` it likes — it stops a page on another origin from
     // spending this bridge's secret through someone else's browser.
     //
-    // `ccdpOrigin` and nothing else. An application origin is admitted only if
-    // it is also exactly this one: the caller here is the Prover on the
-    // distribution, not the application, so `allowedAppOrigins` grants nothing.
-    //
-    // Exactly one, and exactly the configured origin. Missing, `null`,
-    // malformed and repeated all fail here, which is what the contract asks
-    // for -- and the counting is shared with the configuration route so the
-    // two cannot drift.
+    // Exactly one, and a member of the effective admission set. The ceremony's
+    // caller here is the Prover on the CCDP origin, but the contract makes this
+    // route use "the same `allowedOrigins` rule as configuration and Callback",
+    // so a configured application origin is admitted too. Missing, `null`,
+    // malformed, repeated and unlisted all fail, and the counting is shared
+    // with the configuration route so the two cannot drift.
     let admitted = matches!(
         crate::routes::origins(&headers),
         crate::routes::Origins::One(origin)
-            if origin.as_bytes() == github.ccdp_origin.as_bytes()
+            if origin.to_str().is_ok_and(|o| github.allowed_origins.iter().any(|a| a == o))
     );
     if !admitted {
         return Err(TokenError {
             status: StatusCode::FORBIDDEN,
-            message: "this route is callable only from the configured CCDP origin".into(),
+            message: "this route is callable only from an admitted origin".into(),
         });
     }
 
