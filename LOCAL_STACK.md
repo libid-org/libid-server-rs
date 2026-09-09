@@ -65,3 +65,27 @@ is what breaks `build:ccdp-artifacts` with an unhelpful error.
       https://localhost:4682/api/v1/ceremony/config
     curl -sk -X POST -H 'Origin: https://localhost:4683' \
       -H 'Content-Type: application/json' --data @/home/horacio/.claude/jobs/48929bf8/tmp/tok.json $T
+
+## Rebuilding the CCDP artifacts — the three things that are easy to miss
+
+    cd $STACK/libid/ts/packages/ceremony
+    LIBID_LEDGER_FIXTURE=1 LIBID_NOTARY_ADDRESS=https://localhost:7048 \
+      node build/distribution.ts --out-dir "$PWD/.cache/qualification"
+
+- **`LIBID_LEDGER_FIXTURE=1`** or `@libid/ledger` ships a stub whose `decode`
+  always throws, and the prover dies on `test:testnet`. The build then refuses
+  any `--out-dir` outside `.cache`, which is why the path is spelled out.
+- **`LIBID_NOTARY_ADDRESS`** or the artifacts name `notary.lib.id` and
+  `testnet.notary.lib.id`. The bridge refuses the request
+  (*"does not serve the notary this request names"*) and it also lands in the
+  prover document's `connect-src`.
+- **The container serves its own copy.** `libid-ccdp:local` bakes `public/` and
+  `sws.toml` in, so a rebuild changes nothing until the image is rebuilt — or,
+  better, run it with the artifacts bind-mounted:
+
+      docker run -d --name libid-ccdp -p 8787:8787 \
+        -v "$Q/public":/home/sws/public:ro \
+        -v "$Q/sws.toml":/etc/sws.toml:ro libid-ccdp:local
+
+Restart the bridge after any rebuild: it reads `callback.html` once, at startup,
+and computes the CSP hash from those bytes.

@@ -135,6 +135,42 @@ The failure has moved past this service entirely: the browser leg now reports
 `Ceremony failed` with nothing in the app console — which is Bug 2 below,
 swallowed diagnostics, in the way again.
 
+## NEXT BLOCKER — the bridge and the browser disagree on the request layout
+
+With the hand-back fixed, the ceremony now clears the bridge AND the notary and
+dies one step later, in the browser Prover:
+
+    Error: invalid GitHub token payload: request layout
+
+`ts/packages/ceremony/src/platforms/github/1/token.ts:87` requires:
+
+```js
+revealed.length !== 5 || commitments.length !== 2 || line.start !== 0 || ...
+    invalid('request layout')
+```
+
+Five revealed spans — the request line plus four form fields — with the HTTP
+request headers HIDDEN as `commitments[0]`, covering
+`REQUEST_LINE.length .. fields[0].start`.
+
+`libid-transcript::ceremony::token_request` produces **one** revealed span:
+
+```rust
+Ok(layout(one(0..start), sent.len()))   // start = offset of "&client_secret="
+```
+
+One contiguous prefix, headers included, secret committed as the suffix. The
+bridge's own test asserts it — `assert_eq!(layout.reveal.len(), 1)`.
+
+**Unchanged on PR #2's head** (`25d182d`), where it is
+`Self::revealing(core::iter::once(0..start), sent.len())` — same single span.
+So bumping the pin does not resolve it.
+
+This is a design question, not a typo: the TS side deliberately hides the
+request headers from the notary while the Rust side reveals them. One of the two
+has to move, and which one is a disclosure decision rather than an
+implementation detail. Not touched here.
+
 ## Bug 1 — GitHub's RFC 9207 `iss` breaks every GitHub ceremony
 
 `ts/packages/ceremony/src/platforms/codeReturn.ts:20`
