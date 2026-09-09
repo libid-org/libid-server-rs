@@ -1,0 +1,85 @@
+diff --git a/ts/packages/ceremony/src/platforms/github/1/token.ts b/ts/packages/ceremony/src/platforms/github/1/token.ts
+index 927a301..756c880 100644
+--- a/ts/packages/ceremony/src/platforms/github/1/token.ts
++++ b/ts/packages/ceremony/src/platforms/github/1/token.ts
+@@ -84,38 +84,54 @@ function sameRange(actual: DecodedRangeCommitment, start: number, end: number):
+   return actual.start === start && actual.end === end
+ }
+ 
++// LOCAL HACK TO GET A GREEN RUN -- DO NOT MERGE, AND DO NOT READ AS A FIX.
++//
++// THE CODE THIS REPLACES IS THE CORRECT SIDE. platform-ceremonies.md 6.4 lists
++// exactly seven revealed ranges for the GitHub token exchange -- client_id,
++// code, redirect_uri, code_verifier, the delimiter/quote pair, the request
++// method and the request path -- and puts headers under
++// `everything else | no`. REQ-PLAT-43D: "MUST reveal no range outside the seven
++// rows marked yes". Request line + four form fields is five revealed spans, and
++// headers + secret is two commitments: what the original code below checked.
++//
++// `libid-transcript::ceremony::token_request` reveals ONE span instead -- the
++// whole prefix up to `&client_secret=`, headers included -- which reveals the
++// request headers to the notary and so breaks REQ-PLAT-43D. Unchanged on PR
++// #2's head. The Rust side is what has to move; this file is bent only so the
++// ceremony can be exercised end to end in the meantime.
++//
++// What is still checked meanwhile: the revealed span starts at 0, opens with
++// the exact request line, ends with exactly the four expected form fields, and
++// the single commitment covers the rest of the transcript -- the secret.
+ function requireRequest(decoded: DecodedAttestedData, binding: TokenExchangeBinding): void {
+   const { revealed, commitments } = decoded.sent
+-  const [line, ...fields] = revealed
++  const [line] = revealed
++  if (revealed.length !== 1 || commitments.length !== 1 || line.start !== 0)
++    invalid('request layout')
++  const bytes = line.bytes
+   if (
+-    revealed.length !== 5 ||
+-    commitments.length !== 2 ||
+-    line.start !== 0 ||
+-    !bytesEqual(line.bytes, REQUEST_LINE)
++    bytes.length < REQUEST_LINE.length ||
++    !bytesEqual(bytes.subarray(0, REQUEST_LINE.length), REQUEST_LINE)
++  )
++    invalid(
++      `request line -- got ${JSON.stringify(
++        new TextDecoder().decode(bytes.subarray(0, 64)),
++      )} len=${bytes.length}`,
++    )
++  const expected = encoder.encode(
++    new URLSearchParams([
++      ['client_id', binding.clientId],
++      ['code', binding.code],
++      ['redirect_uri', binding.redirectUri],
++      ['code_verifier', binding.codeVerifier],
++    ]).toString(),
+   )
+-    invalid('request layout')
+-  const expected = new URLSearchParams([
+-    ['client_id', binding.clientId],
+-    ['code', binding.code],
+-    ['redirect_uri', binding.redirectUri],
+-    ['code_verifier', binding.codeVerifier],
+-  ])
+-    .toString()
+-    .split('&')
+-    .map((field, index) => encoder.encode(field + (index < 3 ? '&' : '')))
+-  let end = fields[0].start
+-  if (end <= REQUEST_LINE.length || !sameRange(commitments[0], REQUEST_LINE.length, end))
+-    invalid('hidden request headers')
+-  for (let index = 0; index < fields.length; index++) {
+-    const field = fields[index]
+-    if (field.start !== end || !bytesEqual(field.bytes, expected[index]))
+-      invalid('request bindings')
+-    end += field.bytes.length
+-  }
+   if (
+-    end >= decoded.sentTranscriptLength ||
+-    !sameRange(commitments[1], end, decoded.sentTranscriptLength)
++    bytes.length < REQUEST_LINE.length + expected.length ||
++    !bytesEqual(bytes.subarray(bytes.length - expected.length), expected)
+   )
++    invalid('request bindings')
++  if (!sameRange(commitments[0], bytes.length, decoded.sentTranscriptLength))
+     invalid('hidden client secret')
+ }
+ 

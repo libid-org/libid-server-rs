@@ -135,7 +135,63 @@ The failure has moved past this service entirely: the browser leg now reports
 `Ceremony failed` with nothing in the app console — which is Bug 2 below,
 swallowed diagnostics, in the way again.
 
-## NEXT BLOCKER — the bridge and the browser disagree on the request layout
+## THE CEREMONY COMPLETES
+
+    Ceremony finished.
+    Proof received. Independent verification has not been run.
+    No transaction was submitted.
+
+Both notarized sessions run: the bridge's MPC-TLS token exchange, and the
+browser's own ProxyMode `/user` session —
+
+    notary:  Ceremony attestation sent to prover                    (exchange)
+             ProxyMode verified: 192 sent, 3055 recv bytes for api.github.com
+             ProxyMode: ceremony attestation ready for api.github.com
+
+**Read the caveat before celebrating.** Three of the four changes are real
+fixes; the fourth is a hack that relaxes a check the specification requires, and
+without it the run is not green. See "What is still bent" below.
+
+### Bug 3 — the request line is sent in absolute form
+
+Found by the run that got this far, and the most consequential of the three.
+`prover_generic` writes the request line from the caller's URI, and the caller
+has to supply an absolute one because that is the only place the SNI host and
+the TCP peer come from (`session.rs:402`). So the wire carried:
+
+    POST https://github.com/login/oauth/access_token HTTP/1.1
+
+RFC 9112 3.2.2 reserves that form for a request to a proxy. github.com answers
+it, the exchange succeeds, the notary signs it — and it fails much later, where
+the Platform Verifier compares the revealed request path against its profile
+constant and finds an absolute URL. `token.ts` refused it as `request line`.
+
+Fixed in `prover_generic`, not in the bridge: the host and the wire are both
+that function's business, and a bridge that passed an origin-form URI would
+leave it with no host to dial. It rewrites the target after taking the host.
+
+**The bridge's own test could not have caught this.** It asserts
+`req.uri() == TOKEN_URL` — the absolute URL — and its `HEAD` fixture merely
+*states* `POST /login/oauth/access_token HTTP/1.1`, without ever comparing it
+with what goes on the wire. Both were consistent with the bug. The wire form is
+`libid-tlsn`'s decision, so the check belongs there.
+
+### What is still bent
+
+`requireRequest` in `ts/.../github/1/token.ts` was relaxed from five revealed
+spans to one, to accept what `ceremony::token_request` produces. Kept as
+`browser-request-layout.hack.patch`. **The browser was right and the Rust is
+wrong**: platform-ceremonies.md 6.4 lists seven revealed ranges for the GitHub
+exchange and files headers under `everything else | no`, and REQ-PLAT-43D says
+"MUST reveal no range outside the seven rows marked yes". Request line plus four
+form fields is five spans; headers plus secret is two commitments — exactly what
+the original code checked.
+
+So the green run above proves the transport, the hand-back and the request line.
+It does **not** prove the disclosure layout, which is still the Rust side's to
+fix.
+
+## Superseded — the bridge and the browser disagree on the request layout
 
 With the hand-back fixed, the ceremony now clears the bridge AND the notary and
 dies one step later, in the browser Prover:

@@ -1,5 +1,5 @@
 diff --git a/crates/libid-tlsn/src/session.rs b/crates/libid-tlsn/src/session.rs
-index 5aafc6f..419f299 100644
+index 5aafc6f..091a8fb 100644
 --- a/crates/libid-tlsn/src/session.rs
 +++ b/crates/libid-tlsn/src/session.rs
 @@ -8,6 +8,7 @@ use hyper::{
@@ -18,7 +18,33 @@ index 5aafc6f..419f299 100644
          TranscriptCommitment,
          TranscriptSecret,
      },
-@@ -530,6 +532,13 @@ where
+@@ -408,6 +410,25 @@ where
+     let method = request.method().clone();
+     let path = request.uri().path().to_string();
+ 
++    // The request line must carry the ORIGIN form. The caller has to hand over
++    // an absolute URI -- it is the only place the host above can come from --
++    // but hyper then writes `POST https://host/path HTTP/1.1`, the form RFC
++    // 9112 3.2.2 reserves for a request to a proxy. The platform answers it, so
++    // nothing fails at exchange time; the fault surfaces much later, when a
++    // verifier compares the revealed request path with its profile constant and
++    // finds an absolute URL. Rewritten here, where both the host and the wire
++    // are already this function's business.
++    let mut request = request;
++    *request.uri_mut() = request
++        .uri()
++        .path_and_query()
++        .map(|p| p.as_str())
++        .unwrap_or("/")
++        .parse()
++        .map_err(|e| Error::MpcTlsFailed {
++            detail: format!("request target: {e}"),
++        })?;
++
+     let session = Session::new(socket.compat());
+     let (driver, mut handle) = session.split();
+     // Guarded spawn: every exit path below — each `?`, panics, the caller
+@@ -530,6 +551,13 @@ where
          let notary_sent_ranges = sent_layout.reveal.clone();
  
          let mut tc_builder = TranscriptCommitConfig::builder(&transcript);
@@ -32,7 +58,7 @@ index 5aafc6f..419f299 100644
          let (sent_commits, recv_commits) =
              (sent_layout.commit.clone(), recv_layout.commit.clone());
          for range in sent_commits {
-@@ -708,6 +717,12 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
+@@ -708,6 +736,12 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
      // dropping this future — aborts the driver instead of detaching it.
      let mut driver_task = AbortOnDrop::new(tokio::spawn(driver));
  
@@ -45,7 +71,7 @@ index 5aafc6f..419f299 100644
      let setup = async {
          let verifier = handle
              .new_verifier(
-@@ -755,6 +770,7 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
+@@ -755,6 +789,7 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
          let verifier = verifier.run().await.map_err(|e| Error::MpcTlsFailed {
              detail: format!("run: {e}"),
          })?;
@@ -53,7 +79,7 @@ index 5aafc6f..419f299 100644
  
          let tls_transcript = verifier.tls_transcript().clone();
  
-@@ -811,17 +827,33 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
+@@ -811,17 +846,33 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
      // connection died under the session (e.g. a health probe that connected
      // and immediately closed) — a protocol request already submitted to it
      // may then never resolve, so fail instead of pending forever.
