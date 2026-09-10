@@ -1,6 +1,5 @@
 //! Binary entrypoint: parse config, build state, serve.
 
-use clap::Parser;
 use tracing::info;
 
 use libid_server_rs::{
@@ -18,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let cfg = Config::parse();
+    let cfg = Config::resolve()?;
     let addr = format!("{}:{}", cfg.host, cfg.port);
 
     let state = build_state(&cfg)?;

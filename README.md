@@ -184,40 +184,43 @@ limit belongs in the proxy, where the client is identified.
 
 ## Configuration
 
-All settings come from environment variables (or the matching `--flag`).
+The bridge reads a TOML configuration file named by `LIBID_CONFIG` or
+`--config`. Every key in it can be overridden by the environment variable or
+flag of the same name; precedence is flag, then environment variable, then
+file, then default. `bridge.toml.example` beside this README is a complete
+starting point:
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
-| `PORT` | `8722` | Bind port. |
-| `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server, as a bare origin; HTTPS unless loopback. Every provider's registered callback URL must be exactly `{BASE_URL}{CALLBACK_PATH}`. |
-| `ALLOWED_APP_ORIGINS` | *(required)* | Comma-separated application origins. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once, and it governs the configuration route and what the callback document is told. The token route is deliberately narrower: it admits `CCDP_ORIGIN` alone, because the Prover is its only caller. |
-| `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
-| `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
-| `CALLBACK_ARTIFACT_PATH` | *(empty)* | A `callback.html` obtained from the CCDP Distribution, served instead of the compiled-in floor. Read once at startup and held to the same shape either way. **Unset means the floor, which completes no ceremony** — set this to run real ceremonies. |
-| `CEREMONY_PLATFORMS` | *(required)* | The enabled platforms as JSON — see below. |
-| `NOTARY_URL` | `tcp://127.0.0.1:7047` | The notary server's TCP endpoint. |
-| `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret. Required exactly when `CEREMONY_PLATFORMS` enables `github`, and refused otherwise. |
+```toml
+base_url            = "https://bridge.example"
+notary_url          = "tcp://notary.example:7047"
+allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
-### `CEREMONY_PLATFORMS`
-
-```json
-[{ "id": "github", "clientId": "Iv1.…", "versions": [1] }]
+[[platforms]]
+id        = "github"
+client_id = "Iv1.0123456789abcdef"
+versions  = [1]
 ```
 
-One record per enabled platform, and the only place a platform is named. The
-public configuration is a projection of it, so there is no second list to keep
-in step. `GH_OAUTH_CLIENT_ID` is gone for that reason: the GitHub client id is
-the `clientId` of the `github` record. No circuit is named here — proving
-assets belong to the CCDP Distribution, which pins its own; a bridge advertises
-only the platform/version pairs that distribution serves, and cannot check that
-itself.
+An unknown key is refused at startup. The platforms are set only in the file,
+one `[[platforms]]` table per enabled platform: its `id` (`github`, `google` or
+`x`), its public `client_id`, and the ceremony `versions` it advertises; the
+GitHub token exchange implements version 1. `gh_oauth_client_secret` may be set
+in the file or in the environment; a file that carries it stays out of version
+control (`bridge.toml` is ignored by git).
 
-There is no signing key to configure, and no AWS/KMS grant to provision: the
-server signs nothing (see [Trust model](#trust-model)). `BACKEND_SIGNING_KEY`
-is gone — a deployment that still sets it is not broken, but the value is
-ignored, so drop it from your secrets. The only secret this server needs is
-`GH_OAUTH_CLIENT_SECRET`.
+| Key | Environment | Default | Meaning |
+|---|---|---|---|
+| `host` | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
+| `port` | `PORT` | `8722` | Bind port. |
+| `base_url` | `BASE_URL` | `http://127.0.0.1:8722` | Public URL of this server, as a bare origin; HTTPS unless loopback. Every provider's registered callback URL must be exactly `{BASE_URL}{CALLBACK_PATH}`. |
+| `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once, and it governs the configuration route and what the callback document is told. The token route is deliberately narrower: it admits `CCDP_ORIGIN` alone, because the Prover is its only caller. |
+| `callback_path` | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
+| `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
+| `callback_artifact_path` | `CALLBACK_ARTIFACT_PATH` | *(empty)* | A `callback.html` obtained from the CCDP Distribution, served instead of the compiled-in floor. Read once at startup and held to the same shape either way. **Unset means the floor, which completes no ceremony** — set this to run real ceremonies. |
+| `notary_url` | `NOTARY_URL` | `tcp://127.0.0.1:7047` | The notary server's TCP endpoint. |
+| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables. File only. |
+| `gh_oauth_client_secret` | `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret. Required exactly when a platform is `github`, and refused otherwise. |
+| — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
 
 ### On Google
 
@@ -237,11 +240,8 @@ is not that rotator either.
 
 ```sh
 docker run --rm -p 8722:8722 \
-  -e BASE_URL=https://handles.example.com \
-  -e NOTARY_URL=tcp://notary.example.com:7047 \
-  -e ALLOWED_APP_ORIGINS=https://app.example.com \
-  -e CCDP_ORIGIN=https://ccdp.lib.id \
-  -e CEREMONY_PLATFORMS='[{"id":"github","clientId":"Iv1....","versions":[1]}]' \
+  -v ./bridge.toml:/etc/libid/bridge.toml:ro \
+  -e LIBID_CONFIG=/etc/libid/bridge.toml \
   -e GH_OAUTH_CLIENT_SECRET=... \
   ghcr.io/libid-org/libid-server-rs:latest
 ```

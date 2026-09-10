@@ -79,7 +79,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         }
         set.into()
     };
-    let platforms = deployment::platforms(&cfg.ceremony_platforms)?;
+    let platforms = deployment::platforms(cfg.platforms.clone())?;
     // A constant that either always parses or never does, parsed here so a
     // build in which it does not fails at startup rather than on the first
     // ceremony that reaches it.
@@ -107,15 +107,14 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         (None, "") => None,
         (Some(_), _) => {
             return Err(Error::Config {
-                detail: "CEREMONY_PLATFORMS enables github, so GH_OAUTH_CLIENT_SECRET \
-                         must be set: the exchange is confidential or it is nothing"
+                detail: "the platforms enable github, so GH_OAUTH_CLIENT_SECRET must \
+                         be set"
                     .into(),
             })
         }
         (None, _) => {
             return Err(Error::Config {
-                detail: "GH_OAUTH_CLIENT_SECRET is set but CEREMONY_PLATFORMS enables \
-                         no github, so nothing can ever spend it"
+                detail: "GH_OAUTH_CLIENT_SECRET is set but no platform enables github"
                     .into(),
             })
         }
@@ -461,16 +460,11 @@ mod tests {
 
     /// A deployment that starts, with `args` replacing any default it names.
     ///
-    /// Overriding rather than appending, because clap refuses a flag given
-    /// twice -- so a test that means "this one value differs" must not also
-    /// leave the default behind.
+    /// Every flag that reads an environment variable is listed, so the
+    /// process environment reaches nothing. `--platforms` is this fixture's
+    /// own: the JSON records go to `Config::platforms`, which the binary
+    /// fills from the configuration file.
     fn config(args: &[&str]) -> config::Config {
-        // EVERY flag that reads an environment variable is listed, including
-        // ones no assertion cares about. clap falls back to the process
-        // environment for any flag an argv does not carry, so an omitted one
-        // is the developer's shell reaching into the fixture -- `CALLBACK_PATH`
-        // exported for a local run makes the router mount somewhere else and
-        // every callback assertion fails with a 404 that names no cause.
         let mut flags: Vec<(&str, &str)> = vec![
             ("--host", "127.0.0.1"),
             ("--port", "8722"),
@@ -480,7 +474,7 @@ mod tests {
             ("--allowed-app-origins", "https://app.example"),
             ("--ccdp-origin", "https://ccdp.example"),
             (
-                "--ceremony-platforms",
+                "--platforms",
                 r#"[{"id":"github","clientId":"Iv1.0123456789abcdef","versions":[1]}]"#,
             ),
             ("--gh-oauth-client-secret", "ghs_secret"),
@@ -494,12 +488,20 @@ mod tests {
                 None => flags.push((flag, value)),
             }
         }
+        let platforms = flags
+            .iter()
+            .position(|(f, _)| *f == "--platforms")
+            .map(|i| flags.remove(i).1)
+            .expect("the fixture lists --platforms");
         let mut argv = vec!["libid-server-rs"];
         for (flag, value) in &flags {
             argv.push(flag);
             argv.push(value);
         }
-        <config::Config as clap::Parser>::parse_from(argv)
+        let mut cfg = <config::Config as clap::Parser>::parse_from(argv);
+        cfg.platforms =
+            serde_json::from_str(platforms).expect("the fixture's platform records");
+        cfg
     }
 
     /// The redirect URI is derived, not configured, and a provider refuses an
@@ -838,7 +840,7 @@ mod tests {
     #[test]
     fn the_published_configuration_keys_every_enabled_platform_by_name() {
         let state = build_state(&config(&[
-            "--ceremony-platforms",
+            "--platforms",
             r#"[{"id":"google","clientId":"g","versions":[1,2]},{"id":"x","clientId":"xc","versions":[3]},{"id":"github","clientId":"gh","versions":[1]}]"#,
         ]))
         .unwrap();
@@ -866,7 +868,7 @@ mod tests {
         assert!(build_state(&config(&no_secret)).is_err());
 
         let x_only = vec![
-            "--ceremony-platforms",
+            "--platforms",
             r#"[{"id":"x","clientId":"abc","versions":[1]}]"#,
         ];
         assert!(
@@ -875,7 +877,7 @@ mod tests {
         );
 
         let neither = vec![
-            "--ceremony-platforms",
+            "--platforms",
             r#"[{"id":"x","clientId":"abc","versions":[1]}]"#,
             "--gh-oauth-client-secret",
             "",
@@ -898,7 +900,7 @@ mod tests {
         let _: axum::Router = routes::build_router(state);
 
         let x_only = build_state(&config(&[
-            "--ceremony-platforms",
+            "--platforms",
             r#"[{"id":"x","clientId":"abc","versions":[1]}]"#,
             "--gh-oauth-client-secret",
             "",

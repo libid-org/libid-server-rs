@@ -1,26 +1,34 @@
-//! Configuration, parsed from CLI args / environment variables via `clap`.
+//! Configuration: a TOML file, environment variables and command-line flags.
 
-use clap::Parser;
+use clap::{
+    CommandFactory,
+    FromArgMatches,
+    Parser,
+};
+use serde::Deserialize;
 use url::Url;
 
-/// Everything this bridge reads from its environment.
+use crate::{
+    deployment::PlatformProfile,
+    error::{
+        Error,
+        Result,
+    },
+};
+
+/// The deployment's settings.
 ///
-/// Every flag has an environment-variable form; the env names are the
-/// deployment contract.
-///
-/// There is deliberately no signing key among them, and no
-/// `BACKEND_SIGNING_KEY`: this service holds no key of its own. It used to
-/// countersign every proof, which looked like a second trust root but never
-/// was one — the backend IS that signer, so a compromised backend simply
-/// signed whichever pairing it liked.
-///
-/// `NOTARY_ADDRESS`, `CHAIN_ID` and `VERIFIER_CONTRACT_ADDRESS` are gone with
-/// it. They described a proof this service no longer verifies: the browser
-/// checks the notary's attestation itself, and the Platform Verifier checks it
-/// on chain. Nothing here reads a contract or a chain.
+/// Every flag has an environment variable of the same name. Precedence is
+/// command line, then environment, then the configuration file, then the
+/// default.
 #[derive(Parser)]
 #[command(name = "libid-server-rs", version, about)]
 pub struct Config {
+    /// Path to a TOML configuration file. Every setting below can be written
+    /// in it under its own name in lower case.
+    #[arg(long, env = "LIBID_CONFIG")]
+    pub config: Option<std::path::PathBuf>,
+
     /// Host to bind. Use 0.0.0.0 in containers.
     #[arg(long, env = "HOST", default_value = "127.0.0.1")]
     pub host: String,
@@ -29,17 +37,10 @@ pub struct Config {
     #[arg(long, env = "PORT", default_value = "8722")]
     pub port: u16,
 
-    /// Public base URL of THIS bridge, as a bare origin: scheme, host and, if
-    /// it is not the default, port. A path, query, fragment or credentials are
-    /// refused at startup, because this is the origin every registered
-    /// `redirect_uri` is built on and a browser sends none of them.
-    ///
-    /// HTTPS, unless the host is loopback: the bridge origin is a code-supply
-    /// boundary for the callback document, and a plaintext one is no boundary.
-    ///
-    /// The registered OAuth callback URL is derived as
-    /// `{BASE_URL}{CALLBACK_PATH}` and must match every provider's
-    /// registration exactly.
+    /// This bridge's public origin: scheme, host and, if it is not the
+    /// default, port. No path, query, fragment or credentials. HTTPS unless
+    /// the host is loopback. The registered OAuth callback URL is
+    /// `{BASE_URL}{CALLBACK_PATH}`.
     #[arg(long, env = "BASE_URL", default_value = "http://127.0.0.1:8722")]
     pub base_url: String,
 
@@ -48,67 +49,36 @@ pub struct Config {
     pub notary_url: Url,
 
     /// Comma-separated application origins admitted to read the public
-    /// ceremony configuration. Nonempty, and deployment data: it is never
-    /// inferred from a request's `Origin`, `Referer`, query or body.
-    #[arg(long, env = "ALLOWED_APP_ORIGINS")]
+    /// ceremony configuration. Nonempty, each in canonical form. Empty means
+    /// unset.
+    #[arg(long, env = "ALLOWED_APP_ORIGINS", default_value = "")]
     pub allowed_app_origins: String,
 
-    /// The path the providers redirect back to, and the one route whose name
-    /// a deployment chooses. There is no alias and no redirect: every enabled
-    /// platform registers this exact URL.
+    /// The path the providers redirect back to. Every enabled platform
+    /// registers this exact URL.
     #[arg(long, env = "CALLBACK_PATH", default_value = "/auth/callback")]
     pub callback_path: String,
 
-    /// The CCDP Distribution this bridge selects: one canonical HTTPS origin
-    /// that serves the Callback artifact this bridge configures and everything
-    /// the browser runs after it. Published in the configuration and inserted
-    /// into the document. The artifact path is fixed, so no artifact URL, and
-    /// no circuit or notary, is configured.
-    ///
-    /// Defaults to the canonical libID Distribution, which is what the
-    /// contract says an omitted value selects. It is a default and not a
-    /// fallback: a deployment that sets this gets exactly what it set, and one
-    /// that does not is pointed at `lib.id` rather than refused.
+    /// The CCDP Distribution this bridge selects: the canonical origin serving
+    /// the Callback artifact and everything the browser runs after it.
+    /// Published in the configuration and inserted into the callback document.
     #[arg(long, env = "CCDP_ORIGIN", default_value = "https://lib.id")]
     pub ccdp_origin: String,
 
-    /// A Callback artifact to serve instead of the compiled-in floor.
-    ///
-    /// The path to a `callback.html` this deployment has already obtained from
-    /// its CCDP Distribution. Read once at startup, then validated and
-    /// configured exactly as the compiled-in one is -- the only difference is
-    /// where the bytes came from.
-    ///
-    /// Unset means the floor, which clears the OAuth return, renders fixed text
-    /// and completes no ceremony. A deployment meaning to serve real ceremonies
-    /// sets this.
+    /// A Callback artifact to serve instead of the compiled-in floor: the path
+    /// to a `callback.html` obtained from the CCDP Distribution, read once at
+    /// startup. Empty serves the floor, which completes no ceremony.
     #[arg(long, env = "CALLBACK_ARTIFACT_PATH", default_value = "")]
     pub callback_artifact_path: String,
 
-    /// The enabled platforms, as JSON. One record per platform, each with its
-    /// public client id and its advertised ceremony versions:
-    ///
-    /// ```json
-    /// [{"id":"github","clientId":"Iv1.…","versions":[1]}]
-    /// ```
-    ///
-    /// One record, one projection here: the public configuration. The prover
-    /// profiles live on the CCDP Distribution, which pins its own circuits; a
-    /// bridge advertises only pairs that distribution serves. A separate
-    /// `GH_OAUTH_CLIENT_ID` is gone — it was a second list of platforms, kept
-    /// in step by hand.
-    #[arg(long, env = "CEREMONY_PLATFORMS")]
-    pub ceremony_platforms: String,
+    /// The enabled platforms, from the configuration file's `[[platforms]]`
+    /// tables: each names a platform, its public client id and the ceremony
+    /// versions it advertises.
+    #[arg(skip)]
+    pub platforms: Vec<PlatformProfile>,
 
-    /// GitHub OAuth App client secret. Required exactly when the platforms
-    /// above enable `github`, and refused when they do not: it is the one
-    /// value that must never reach the public configuration, so it has no
-    /// business being set for a platform nobody can select.
-    ///
-    /// `hide_env_values` because clap prints an argument's environment value
-    /// into its own help text. The image's entrypoint is this binary, so
-    /// `docker run <image> --help` with the env file attached wrote the secret
-    /// to stdout.
+    /// GitHub OAuth App client secret. Required when the platforms enable
+    /// `github`, refused when they do not.
     #[arg(
         long,
         env = "GH_OAUTH_CLIENT_SECRET",
@@ -118,13 +88,122 @@ pub struct Config {
     pub gh_oauth_client_secret: String,
 }
 
-/// Written by hand, and without the secret.
+/// The configuration file.
 ///
-/// `Debug` is one of the two ways a client secret can leave this process by
-/// accident: a `dbg!`, a `tracing::debug!(?cfg)`, or a panic formatting the
-/// struct would put it in the log stream. `OAuthCredentials` derives only
-/// `Clone` for the same reason. The other is clap's own help text, which is
-/// why the argument above sets `hide_env_values`.
+/// Every key is optional and corresponds to the [`Config`] field of the same
+/// name; an unknown key is refused. `allowed_app_origins` is a list, and the
+/// platforms are `[[platforms]]` tables.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FileConfig {
+    /// [`Config::host`].
+    pub host: Option<String>,
+    /// [`Config::port`].
+    pub port: Option<u16>,
+    /// [`Config::base_url`].
+    pub base_url: Option<String>,
+    /// [`Config::notary_url`].
+    pub notary_url: Option<Url>,
+    /// [`Config::allowed_app_origins`], as a list.
+    pub allowed_app_origins: Option<Vec<String>>,
+    /// [`Config::callback_path`].
+    pub callback_path: Option<String>,
+    /// [`Config::ccdp_origin`].
+    pub ccdp_origin: Option<String>,
+    /// [`Config::callback_artifact_path`].
+    pub callback_artifact_path: Option<String>,
+    /// [`Config::platforms`]:
+    ///
+    /// ```toml
+    /// [[platforms]]
+    /// id = "github"
+    /// client_id = "Iv1.0123456789abcdef"
+    /// versions = [1]
+    /// ```
+    pub platforms: Option<Vec<PlatformProfile>>,
+    /// [`Config::gh_oauth_client_secret`].
+    pub gh_oauth_client_secret: Option<String>,
+}
+
+/// Whether clap supplied `id` from its default rather than from the command
+/// line or the environment.
+fn defaulted(matches: &clap::ArgMatches, id: &str) -> bool {
+    !matches!(
+        matches.value_source(id),
+        Some(clap::parser::ValueSource::CommandLine)
+            | Some(clap::parser::ValueSource::EnvVariable)
+    )
+}
+
+impl Config {
+    /// Resolve the configuration from the process's arguments, environment
+    /// and configuration file.
+    pub fn resolve() -> Result<Config> {
+        Config::resolve_from(std::env::args_os())
+    }
+
+    /// The same, from an explicit argv. A value from the file is used where
+    /// neither a flag nor an environment variable set the field.
+    pub fn resolve_from<I, T>(argv: I) -> Result<Config>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let matches = Config::command().get_matches_from(argv);
+        let mut cfg = Config::from_arg_matches(&matches).map_err(|e| Error::Config {
+            detail: e.to_string(),
+        })?;
+        let Some(path) = cfg.config.clone() else {
+            return Ok(cfg);
+        };
+
+        let refuse = |detail: String| Error::Config {
+            detail: format!("{}: {detail}", path.display()),
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| refuse(format!("cannot be read: {e}")))?;
+        let file: FileConfig =
+            toml::from_str(&text).map_err(|e| refuse(e.message().to_owned()))?;
+
+        if defaulted(&matches, "host") {
+            cfg.host = file.host.unwrap_or(cfg.host);
+        }
+        if defaulted(&matches, "port") {
+            cfg.port = file.port.unwrap_or(cfg.port);
+        }
+        if defaulted(&matches, "base_url") {
+            cfg.base_url = file.base_url.unwrap_or(cfg.base_url);
+        }
+        if defaulted(&matches, "notary_url") {
+            cfg.notary_url = file.notary_url.unwrap_or(cfg.notary_url);
+        }
+        if defaulted(&matches, "callback_path") {
+            cfg.callback_path = file.callback_path.unwrap_or(cfg.callback_path);
+        }
+        if defaulted(&matches, "ccdp_origin") {
+            cfg.ccdp_origin = file.ccdp_origin.unwrap_or(cfg.ccdp_origin);
+        }
+        if defaulted(&matches, "callback_artifact_path") {
+            cfg.callback_artifact_path = file
+                .callback_artifact_path
+                .unwrap_or(cfg.callback_artifact_path);
+        }
+        if defaulted(&matches, "gh_oauth_client_secret") {
+            cfg.gh_oauth_client_secret = file
+                .gh_oauth_client_secret
+                .unwrap_or(cfg.gh_oauth_client_secret);
+        }
+        if defaulted(&matches, "allowed_app_origins") {
+            if let Some(origins) = file.allowed_app_origins {
+                cfg.allowed_app_origins = origins.join(",");
+            }
+        }
+        cfg.platforms = file.platforms.unwrap_or_default();
+        Ok(cfg)
+    }
+}
+
+/// `Debug` redacts the client secret.
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
@@ -136,8 +215,121 @@ impl std::fmt::Debug for Config {
             .field("callback_path", &self.callback_path)
             .field("ccdp_origin", &self.ccdp_origin)
             .field("callback_artifact_path", &self.callback_artifact_path)
-            .field("ceremony_platforms", &self.ceremony_platforms)
+            .field("platforms", &self.platforms)
             .field("gh_oauth_client_secret", &"<redacted>")
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    /// Write a configuration file and resolve against it.
+    fn resolved(toml: &str, flags: &[&str]) -> Result<Config> {
+        let path = std::env::temp_dir().join(format!(
+            "libid-config-{}-{:?}.toml",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, toml).expect("a scratch config file");
+        let mut argv = vec![
+            "libid-server-rs".to_owned(),
+            "--config".to_owned(),
+            path.display().to_string(),
+        ];
+        argv.extend(flags.iter().map(|f| (*f).to_owned()));
+        Config::resolve_from(argv)
+    }
+
+    /// A file supplies what nothing else did, the platform table included.
+    #[test]
+    fn a_file_supplies_what_no_flag_and_no_variable_named() {
+        let cfg = resolved(
+            r#"
+            port = 9110
+            base_url = "https://bridge.example"
+            allowed_app_origins = ["https://app.example", "https://wallet.example"]
+            gh_oauth_client_secret = "ghs_from_the_file"
+
+            [[platforms]]
+            id = "github"
+            client_id = "Iv1.0123456789abcdef"
+            versions = [1]
+            "#,
+            &[],
+        )
+        .expect("a file this deployment can read");
+
+        assert_eq!(cfg.port, 9110);
+        assert_eq!(cfg.base_url, "https://bridge.example");
+        assert_eq!(
+            cfg.allowed_app_origins,
+            "https://app.example,https://wallet.example"
+        );
+        assert_eq!(cfg.gh_oauth_client_secret, "ghs_from_the_file");
+        let platforms = crate::deployment::platforms(cfg.platforms)
+            .expect("the records the table describes");
+        assert_eq!(platforms.len(), 1);
+        assert_eq!(platforms[0].client_id, "Iv1.0123456789abcdef");
+    }
+
+    /// A flag beats the file.
+    #[test]
+    fn the_command_line_beats_the_file() {
+        let cfg = resolved(
+            "port = 9110\ngh_oauth_client_secret = \"ghs_from_the_file\"\n",
+            &[
+                "--port",
+                "9999",
+                "--gh-oauth-client-secret",
+                "ghs_from_a_flag",
+            ],
+        )
+        .expect("a file this deployment can read");
+        assert_eq!(cfg.port, 9999);
+        assert_eq!(cfg.gh_oauth_client_secret, "ghs_from_a_flag");
+    }
+
+    /// Where neither says anything, the default stands.
+    #[test]
+    fn a_silent_file_changes_nothing() {
+        let cfg = resolved("port = 9110\n", &[]).expect("readable");
+        assert_eq!(cfg.callback_path, "/auth/callback");
+    }
+
+    /// A file with no `[[platforms]]` table enables no platform, which the
+    /// platform check refuses by name.
+    #[test]
+    fn no_platform_table_means_no_platform() {
+        let cfg = resolved("port = 9110\n", &[]).expect("readable");
+        assert!(cfg.platforms.is_empty());
+        let err = crate::deployment::platforms(cfg.platforms).expect_err("no platform");
+        assert!(err.to_string().contains("[[platforms]]"), "{err}");
+    }
+
+    /// The example file shipped beside this code is one the code accepts.
+    #[test]
+    fn the_example_file_is_one_this_bridge_accepts() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/bridge.toml.example");
+        let cfg = Config::resolve_from(["libid-server-rs", "--config", path])
+            .expect("the example beside this code");
+
+        assert_eq!(cfg.port, 8722);
+        assert_eq!(cfg.notary_url.as_str(), "tcp://notary.example:7047");
+        assert_eq!(
+            cfg.allowed_app_origins,
+            "https://app.example,https://wallet.example"
+        );
+        let platforms = crate::deployment::platforms(cfg.platforms)
+            .expect("the example's platform table");
+        assert!(platforms.iter().any(|p| p.is_github()));
+    }
+
+    /// A misspelled key is refused rather than ignored.
+    #[test]
+    fn a_misspelled_key_is_refused() {
+        let err = resolved("prot = 9110\n", &[]).expect_err("an unknown key");
+        assert!(err.to_string().contains("prot"), "{err}");
     }
 }

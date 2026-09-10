@@ -40,12 +40,10 @@ const REDIRECT_URI: &str = "http://127.0.0.1:8722/auth/callback";
 /// refuse, which is the only reason `build_router` may take an `AppState` and
 /// route a configured path without being able to fail.
 fn deployment(overrides: &[&str]) -> Arc<AppState> {
-    // EVERY flag that reads an environment variable is listed, including
-    // ones no assertion cares about. clap falls back to the process
-    // environment for any flag an argv does not carry, so an omitted one
-    // is the developer's shell reaching into the fixture -- `CALLBACK_PATH`
-    // exported for a local run makes the router mount somewhere else and
-    // every callback assertion fails with a 404 that names no cause.
+    // Every flag that reads an environment variable is listed, so the process
+    // environment reaches nothing. `--platforms` is this fixture's own: the
+    // JSON records go to `Config::platforms`, which the binary fills from the
+    // configuration file.
     let mut flags: Vec<(&str, &str)> = vec![
         ("--host", "127.0.0.1"),
         ("--port", "8722"),
@@ -58,7 +56,7 @@ fn deployment(overrides: &[&str]) -> Arc<AppState> {
         ("--ccdp-origin", CCDP_ORIGIN),
         ("--notary-url", "tcp://127.0.0.1:7047"),
         (
-            "--ceremony-platforms",
+            "--platforms",
             r#"[{"id":"github","clientId":"test-client-id","versions":[1]}]"#,
         ),
         ("--gh-oauth-client-secret", "test-client-secret"),
@@ -72,12 +70,20 @@ fn deployment(overrides: &[&str]) -> Arc<AppState> {
             None => flags.push((flag, value)),
         }
     }
+    let platforms = flags
+        .iter()
+        .position(|(f, _)| *f == "--platforms")
+        .map(|i| flags.remove(i).1)
+        .expect("the fixture lists --platforms");
     let mut argv = vec!["libid-server-rs"];
     for (flag, value) in &flags {
         argv.push(flag);
         argv.push(value);
     }
-    build_state(&Config::parse_from(argv)).expect("a deployment this suite can serve")
+    let mut cfg = Config::parse_from(argv);
+    cfg.platforms =
+        serde_json::from_str(platforms).expect("the fixture's platform records");
+    build_state(&cfg).expect("a deployment this suite can serve")
 }
 
 /// The default deployment: GitHub enabled, the full exchange ceiling free.
@@ -606,7 +612,7 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
 #[tokio::test]
 async fn the_token_route_is_absent_when_github_is_not_enabled() {
     let state = deployment(&[
-        "--ceremony-platforms",
+        "--platforms",
         r#"[{"id":"x","clientId":"test-client-id","versions":[1]}]"#,
         "--gh-oauth-client-secret",
         "",

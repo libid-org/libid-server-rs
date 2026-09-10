@@ -73,8 +73,8 @@ pub struct PlatformProfile {
     /// Which platform. The catalog is closed, so a name outside it is
     /// refused while this record is parsed.
     pub id: PlatformId,
-    /// The public OAuth client identifier. Public — the browser sends it in
-    /// the authorization request and the token request reveals it.
+    /// The public OAuth client identifier. Also accepted as `client_id`.
+    #[serde(alias = "client_id")]
     pub client_id: String,
     /// Platform ceremony versions, nonempty and duplicate-free. List order
     /// has no meaning.
@@ -88,21 +88,18 @@ impl PlatformProfile {
     }
 }
 
-/// Parse and check the whole enabled set.
-///
-/// Everything here fails the process rather than a ceremony. A platform named
-/// twice, one carrying no client id, or one advertising a version this service
-/// cannot serve is a deployment that starts cleanly and then refuses real
-/// users — which is the failure this function exists to move earlier.
-pub fn platforms(json: &str) -> Result<Vec<PlatformProfile>> {
+/// Check the enabled set: nonempty, each platform once, each with a client id
+/// and a nonempty, duplicate-free version list that this service can serve.
+pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>> {
     let refuse = |detail: String| Error::Config {
-        detail: format!("CEREMONY_PLATFORMS: {detail}"),
+        detail: format!("platforms: {detail}"),
     };
 
-    let profiles: Vec<PlatformProfile> =
-        serde_json::from_str(json).map_err(|e| refuse(e.to_string()))?;
     if profiles.is_empty() {
-        return Err(refuse("names no platform, so no ceremony can run".into()));
+        return Err(refuse(
+            "no platform is enabled; add a [[platforms]] table to the configuration file"
+                .into(),
+        ));
     }
 
     for p in &profiles {
@@ -197,9 +194,18 @@ mod tests {
 
     const ONE: &str = r#"[{"id":"github","clientId":"Iv1.0","versions":[1]}]"#;
 
+    /// Parse records as the configuration file would, then check them.
+    fn checked(json: &str) -> Result<Vec<PlatformProfile>> {
+        let records: Vec<PlatformProfile> =
+            serde_json::from_str(json).map_err(|e| Error::Config {
+                detail: e.to_string(),
+            })?;
+        platforms(records)
+    }
+
     #[test]
     fn a_well_formed_set_parses() {
-        let p = platforms(ONE).unwrap();
+        let p = checked(ONE).unwrap();
         assert_eq!(p.len(), 1);
         assert!(p[0].is_github());
         assert_eq!(p[0].versions, [1]);
@@ -236,7 +242,7 @@ mod tests {
                 r#"[{"id":"x","clientId":"a","label":"X","versions":[1]}]"#,
             ),
         ] {
-            assert!(platforms(json).is_err(), "{why} must be refused");
+            assert!(checked(json).is_err(), "{why} must be refused");
         }
     }
 }
