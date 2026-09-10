@@ -12,7 +12,10 @@
 use std::ops::Range;
 
 use libid_tlsn::Direction;
-use libid_transcript::ceremony;
+use libid_transcript::{
+    ceremony,
+    ranges::JsonMember,
+};
 
 use crate::error::Error;
 
@@ -117,10 +120,6 @@ impl Selection {
 /// valid. The one refusal in its catalogue that the caller can act on.
 const BAD_CODE: &[u8] = b"bad_verification_code";
 
-/// The field GitHub names a refusal in. Its presence says the platform decided
-/// something; its absence says the response was not a refusal at all.
-const ERROR_FIELD: &[u8] = b"\"error\":\"";
-
 /// What the platform actually answered, as far as this service can tell from
 /// the received transcript.
 ///
@@ -145,13 +144,13 @@ pub(super) enum PlatformAnswer {
 /// travels further: what reaches a log or a caller is this service's own words.
 impl PlatformAnswer {
     pub(super) fn in_response(recv: &[u8]) -> Self {
-        let holds = |needle: &[u8]| recv.windows(needle.len()).any(|w| w == needle);
-        if holds(BAD_CODE) {
+        let Some(field) = JsonMember::in_response(recv, "error") else {
+            return PlatformAnswer::Unusable;
+        };
+        if &recv[field.value] == BAD_CODE {
             PlatformAnswer::RefusedTheCode
-        } else if holds(ERROR_FIELD) {
-            PlatformAnswer::RefusedThisDeployment
         } else {
-            PlatformAnswer::Unusable
+            PlatformAnswer::RefusedThisDeployment
         }
     }
 }
@@ -256,6 +255,22 @@ mod tests {
         // commits, read off the attested transcript rather than re-parsed from
         // the decoded body, which need not spell it the same way.
         assert_eq!(found.bearer_bytes, &RECV[found.bearer]);
+    }
+
+    #[test]
+    fn spaced_error_response_uses_the_same_json_reader() {
+        let recv =
+            b"HTTP/1.1 200 OK\r\n\r\n{\"error\" \t: \r\n\"bad_verification_code\"}";
+        assert_eq!(
+            PlatformAnswer::in_response(recv),
+            PlatformAnswer::RefusedTheCode
+        );
+        let recv =
+            b"HTTP/1.1 200 OK\r\n\r\n{\"error\": \"incorrect_client_credentials\"}";
+        assert_eq!(
+            PlatformAnswer::in_response(recv),
+            PlatformAnswer::RefusedThisDeployment
+        );
     }
 
     /// GitHub answers a spent or forged code with `200` and an error object.
