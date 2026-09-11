@@ -1,10 +1,10 @@
 //! The notarized session the exchange runs inside, and what the notary hands
 //! back when it finishes.
 //!
-//! Three budgets, because three different things can stall: reaching the
-//! notary, the protocol itself, and the record written after the protocol is
-//! over. Without separate budgets the first would eat the second's, and the
-//! third would have none at all.
+//! Two budgets here and a third in `egress`, because three different things
+//! can stall: reaching the notary, the protocol itself, and the record written
+//! after the protocol is over. Without separate budgets the first would eat
+//! the second's, and the third would have none at all.
 //!
 //! This is also where a layout refusal becomes a session failure -- the driver
 //! speaks its own error vocabulary, and `layout_failed` is the one place a
@@ -41,14 +41,6 @@ use super::{
     },
 };
 
-/// How long reaching the notary may take.
-///
-/// Kept separate from the session budget below, and short: a notary that is
-/// down refuses at once, but one at an unroutable address hangs for the
-/// kernel's own retry schedule — which would otherwise eat most of the session
-/// budget before the protocol had started.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// How long the session itself may take once the notary has answered.
 ///
 /// An MPC-TLS session is a conversation with two other parties, and a notary
@@ -79,30 +71,14 @@ pub(super) fn layout_failed(e: &ceremony::LayoutError) -> libid_tlsn::Error {
     })
 }
 
-/// Open the session the notary answers on.
-///
-/// Its own budget, and a short one. A notary that is down refuses at once, but
-/// one at an unroutable address hangs for the kernel's retry schedule — which
-/// would otherwise be spent before the protocol had started, out of a budget
-/// meant for the protocol.
-async fn connect_notary(addr: &str) -> Result<tokio::net::TcpStream, Error> {
-    let refused = |detail: String| Error::NotaryConnect {
-        addr: addr.to_owned(),
-        detail,
-    };
-    tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr))
-        .await
-        .map_err(|_| refused("did not answer in time".into()))?
-        .map_err(|e| refused(e.to_string()))
-}
-
 /// Run the exchange inside one notarized session and assemble what it produced.
 pub(super) async fn exchange(
     github: &GithubExchange,
     request: &TokenRequest,
+    notary_host: &str,
 ) -> Result<TokenResponse, Error> {
     let http_request = token_http_request(&github.credentials, request);
-    let socket = connect_notary(&github.notary.socket()).await?;
+    let socket = github.egress.reach(notary_host).await?;
 
     // What the layout decided, kept from inside the session. The bearer's
     // offsets index the raw received transcript, so neither they nor the bytes
@@ -209,23 +185,4 @@ pub(super) async fn exchange(
         },
         bearer_opening,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The notary is reached by address, and a refusal names the address it
-    /// was refused at — the first thing an operator needs when a ceremony
-    /// fails and nothing else in the reply says why.
-    #[tokio::test]
-    async fn a_notary_that_is_not_listening_is_reported_with_its_address() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        assert!(connect_notary(&addr).await.is_ok(), "one that is listening");
-
-        drop(listener);
-        let err = connect_notary(&addr).await.unwrap_err().to_string();
-        assert!(err.contains(&addr), "{err} names where it failed");
-    }
 }

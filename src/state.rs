@@ -31,54 +31,15 @@ use crate::oauth::OAuthCredentials;
 pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
 
 /// Everything the confidential exchange needs, and nothing any other route
-/// does.
-///
-/// These four values are meaningful only where GitHub is enabled, and this is
-/// the token route's own state -- so it is mounted with them or it is not
-/// mounted. There is no deployment that holds a notary address nothing dials,
-/// and no request that has to check whether the state and the router agree.
-/// Where this bridge's notary is, kept as its parts.
-///
-/// Both are wanted separately -- the socket to dial and the host to compare a
-/// request's `notaryAddress` against -- and joining them into one string only
-/// to split it again is how the split acquires a failure case that the join
-/// had already ruled out.
-#[derive(Debug, PartialEq, Eq)]
-pub struct NotaryAddr {
-    /// The host, and what a request's `notaryAddress` is compared against. The
-    /// port is NOT compared: the request carries the endpoint a browser Prover
-    /// reaches while this bridge dials the TCP wire listener, so one notary is
-    /// two ports.
-    pub(crate) host: String,
-    /// The port this bridge connects to.
-    pub(crate) port: u16,
-}
-
-impl NotaryAddr {
-    /// What a TCP connect takes.
-    pub(crate) fn socket(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-}
-
-/// Everything the confidential exchange needs, and nothing any other route
-/// does.
-///
-/// These values are meaningful only where GitHub is enabled, and this is the
-/// token route's own state -- so it is mounted with them or it is not mounted.
-/// There is no deployment that holds a notary address nothing dials, and no
-/// request that has to check whether the state and the router agree.
+/// does. Present exactly when GitHub is enabled: the token route is mounted
+/// with it or not mounted.
 pub struct GithubExchange {
     /// GitHub's confidential client. The secret never leaves this process and
     /// is never revealed in a notarized transcript.
     pub(crate) credentials: OAuthCredentials,
-    /// The notary this bridge opens its token session against, as the
-    /// `host:port` a TCP connect takes.
-    ///
-    /// Resolved from the configured URL once at startup, so a notary URL that
-    /// names no host or no port stops the process from coming up rather than
-    /// failing the first ceremony that reaches it.
-    pub(crate) notary: NotaryAddr,
+    /// Dials the notary each token request names, on the wire port; refuses
+    /// private and internal addresses.
+    pub(crate) egress: crate::routes::github_token::NotaryEgress,
     /// The CCDP Distribution this bridge selects, and the ONLY origin the
     /// token route admits.
     ///
@@ -88,8 +49,7 @@ pub struct GithubExchange {
     /// route that spends the client secret for no caller that exists. It is
     /// not caller authentication either way -- a request with no browser
     /// behind it carries whatever `Origin` it likes -- so this is the browser
-    /// boundary only, and the destination and egress safeguards are what
-    /// stand behind it.
+    /// boundary only, and the egress policy is what stands behind it.
     pub(crate) ccdp_origin: String,
     /// How many exchanges may run at once.
     ///

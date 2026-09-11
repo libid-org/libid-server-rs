@@ -57,7 +57,7 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
 | `GET` | `/api/v1/ceremony/config` | The public ceremony configuration. Readable only from an admitted origin. |
 | `GET` | `{CALLBACK_PATH}` (default `/auth/callback`) | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
-| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin — narrower than `/config`, which admits the whole allowlist — and it answers that origin's preflight. The body carries `notaryAddress`, which must name the notary this deployment serves. `403` for any other origin or notary, `400` for a query, `415` for any media type but exactly `application/json`. |
+| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin — narrower than `/config`, which admits the whole allowlist — and it answers that origin's preflight. The body carries `notaryAddress`, the notary the browser resolved from the ledger; this bridge dials the same host on the wire port, refusing a private or internal one. `403` for any other origin or a refused notary, `400` for a query, `415` for any media type but exactly `application/json`. |
 
 The contract's route surface is closed — "the bridge exposes only" the last
 three — so `/health` is a deliberate deviation, kept because the published
@@ -72,11 +72,11 @@ unhealthy and be restarted for it.
 The one route a platform ceremony genuinely requires of a server, because it is
 the one step needing a client secret.
 
-Request — and nothing else; the client, secret, redirect URI, endpoint and
-notary are this server's own, and none of them is selectable by a caller:
+Request — the code, the PKCE verifier and the notary the browser resolved from
+the ledger; the client, secret, redirect URI and endpoint are this server's own:
 
 ```json
-{ "code": "…", "codeVerifier": "…" }
+{ "code": "…", "codeVerifier": "…", "notaryAddress": "https://notary.example" }
 ```
 
 Response. `accessToken` is the bearer as GitHub spelled it; the other two are
@@ -192,7 +192,6 @@ starting point:
 
 ```toml
 base_url            = "https://bridge.example"
-notary_url          = "tcp://notary.example:7047"
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 [[platforms]]
@@ -217,7 +216,7 @@ control (`bridge.toml` is ignored by git).
 | `callback_path` | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to. The one route whose name a deployment chooses; there is no alias and no redirect. |
 | `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `callback_artifact_path` | `CALLBACK_ARTIFACT_PATH` | *(empty)* | A `callback.html` obtained from the CCDP Distribution, served instead of the compiled-in floor. Read once at startup and held to the same shape either way. **Unset means the floor, which completes no ceremony** — set this to run real ceremonies. |
-| `notary_url` | `NOTARY_URL` | `tcp://127.0.0.1:7047` | The notary server's TCP endpoint. |
+| `notary_wire_port` | `NOTARY_WIRE_PORT` | `7047` | The port of the notary's MPC-TLS wire listener. The notary itself is named by each token request's `notaryAddress`; this bridge dials that host on this port. A private or internal address is refused; loopback is not. |
 | `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables. File only. |
 | `gh_oauth_client_secret` | `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret. Required exactly when a platform is `github`, and refused otherwise. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |

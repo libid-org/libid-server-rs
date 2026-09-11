@@ -99,7 +99,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                     client_secret: secret.to_owned(),
                     redirect_uri: redirect_uri.clone(),
                 },
-                notary: notary_addr(&cfg.notary_url)?,
+                egress: routes::github_token::NotaryEgress::new(cfg.notary_wire_port),
                 ccdp_origin: ccdp_origin.clone(),
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
@@ -424,36 +424,6 @@ fn callback_path(path: &str) -> Result<String> {
     Ok(path.to_owned())
 }
 
-/// The `host:port` of the notary, taken from its configured URL.
-///
-/// The scheme is not consulted: the Rust prover speaks the notary's raw TCP
-/// protocol, and `tcp://` is how the default spells that. What must be there
-/// is an authority, because a session cannot be opened without one.
-fn notary_addr(url: &Url) -> Result<state::NotaryAddr> {
-    let host = url.host_str().ok_or_else(|| Error::NotaryUrl {
-        detail: format!("{url} names no host"),
-    })?;
-    // Lowercased HERE, because `url` does not do it for us at this scheme.
-    // Host case folding is a property of the SPECIAL schemes -- `https` gets an
-    // IDNA-normalised host, `tcp` gets the bytes as written. The token route
-    // parses the caller's `notaryAddress`, which is `https`, and compares the
-    // two hosts byte for byte; without this an operator writing
-    // `NOTARY_URL=tcp://Testnet.Notary.Lib.ID:7047` is refused on every request
-    // by a caller naming the same notary correctly. DNS does not care about the
-    // difference, so nothing else in the process would ever notice.
-    let host = host.to_ascii_lowercase();
-    // `port_or_known_default`, not `port`: `Url` drops a port that is its
-    // scheme's default during normalisation, so `https://notary.example:443`
-    // would otherwise be refused for naming no port while plainly naming one.
-    // `tcp://` has no known default, which is the case the message describes.
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| Error::NotaryUrl {
-            detail: format!("{url} names no port, and its scheme implies none"),
-        })?;
-    Ok(state::NotaryAddr { host, port })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,12 +434,23 @@ mod tests {
     /// process environment reaches nothing. `--platforms` is this fixture's
     /// own: the JSON records go to `Config::platforms`, which the binary
     /// fills from the configuration file.
+    /// A loopback port nothing listens on, bound once and released: a session
+    /// a test does start fails at the dial instead of reaching a notary on
+    /// this machine.
+    fn dead_port() -> &'static str {
+        static PORT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        PORT.get_or_init(|| {
+            let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            free.local_addr().unwrap().port().to_string()
+        })
+    }
+
     fn config(args: &[&str]) -> config::Config {
         let mut flags: Vec<(&str, &str)> = vec![
             ("--host", "127.0.0.1"),
             ("--port", "8722"),
             ("--base-url", "http://127.0.0.1:8722"),
-            ("--notary-url", "tcp://127.0.0.1:7047"),
+            ("--notary-wire-port", dead_port()),
             ("--callback-path", "/auth/callback"),
             ("--allowed-app-origins", "https://app.example"),
             ("--ccdp-origin", "https://ccdp.example"),
@@ -539,19 +520,6 @@ mod tests {
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(record["ccdpOrigin"], "https://lib.id");
-    }
-
-    /// The notary address is resolved once at startup rather than per
-    /// ceremony, so a URL that names no host or no port stops the process
-    /// instead of failing the first exchange that dials it.
-    #[test]
-    fn a_notary_url_is_resolved_to_a_dialable_address_at_startup() {
-        let state = build_state(&config(&[])).unwrap();
-        assert_eq!(
-            state.github.as_ref().unwrap().notary.socket(),
-            "127.0.0.1:7047"
-        );
-        assert!(build_state(&config(&["--notary-url", "tcp://notary.example"])).is_err());
     }
 
     /// Whatever the operator writes, the route compares against what a browser
@@ -690,24 +658,6 @@ mod tests {
         for hostile in ["https://a;b.example", "https://a'b.example"] {
             assert!(canonical_origin("T", hostile).is_err(), "{hostile}");
         }
-    }
-
-    /// `Url` drops a port that is its scheme's default, so reading `port()`
-    /// alone refuses `https://notary.example:443` for naming no port while it
-    /// plainly names one.
-    #[test]
-    fn a_notary_url_whose_port_is_its_schemes_default_is_accepted() {
-        for (url, expected) in [
-            ("https://notary.example", "notary.example:443"),
-            ("https://notary.example:443", "notary.example:443"),
-            ("http://notary.example", "notary.example:80"),
-            ("tcp://127.0.0.1:7047", "127.0.0.1:7047"),
-        ] {
-            let parsed = Url::parse(url).unwrap();
-            assert_eq!(notary_addr(&parsed).unwrap().socket(), expected, "{url}");
-        }
-        // `tcp` has no known default, which is the case the message describes.
-        assert!(notary_addr(&Url::parse("tcp://notary.example").unwrap()).is_err());
     }
 
     /// Anything a browser never sends as `Origin` is refused at startup. Left
@@ -907,23 +857,5 @@ mod tests {
         ]))
         .unwrap();
         let _: axum::Router = routes::build_router(x_only);
-    }
-
-    /// The default spelling, and the one the deployment uses.
-    #[test]
-    fn a_tcp_notary_url_yields_its_authority() {
-        let url = Url::parse("tcp://127.0.0.1:7047").unwrap();
-        assert_eq!(notary_addr(&url).unwrap().socket(), "127.0.0.1:7047");
-    }
-
-    /// The prover speaks the notary's raw TCP protocol, so there is no port to
-    /// infer from a scheme. A URL missing either half is refused at startup
-    /// rather than on the first ceremony that reaches it.
-    #[test]
-    fn a_notary_url_missing_an_authority_is_refused() {
-        for spelling in ["tcp://notary.example", "tcp:7047", "file:///notary"] {
-            let url = Url::parse(spelling).unwrap();
-            assert!(notary_addr(&url).is_err(), "{spelling} names no host:port");
-        }
     }
 }

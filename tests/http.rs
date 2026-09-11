@@ -39,6 +39,17 @@ const REDIRECT_URI: &str = "http://127.0.0.1:8722/auth/callback";
 /// It also means no test can construct a deployment `build_state` would
 /// refuse, which is the only reason `build_router` may take an `AppState` and
 /// route a configured path without being able to fail.
+/// A loopback port nothing listens on, bound once and released: a session a
+/// test does start fails at the dial instead of reaching a notary on this
+/// machine.
+fn dead_port() -> &'static str {
+    static PORT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PORT.get_or_init(|| {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        free.local_addr().unwrap().port().to_string()
+    })
+}
+
 fn deployment(overrides: &[&str]) -> Arc<AppState> {
     // Every flag that reads an environment variable is listed, so the process
     // environment reaches nothing. `--platforms` is this fixture's own: the
@@ -54,7 +65,7 @@ fn deployment(overrides: &[&str]) -> Arc<AppState> {
             "http://localhost:3000,https://wallet.example",
         ),
         ("--ccdp-origin", CCDP_ORIGIN),
-        ("--notary-url", "tcp://127.0.0.1:7047"),
+        ("--notary-wire-port", dead_port()),
         (
             "--platforms",
             r#"[{"id":"github","clientId":"test-client-id","versions":[1]}]"#,
@@ -132,11 +143,11 @@ async fn post_token(origin: Option<&str>, body: String) -> axum::response::Respo
         .unwrap()
 }
 
-/// The notary the fixture's `--notary-url tcp://127.0.0.1:7047` serves, spelled
-/// as a request carries it: a canonical HTTPS origin. Deliberately on a
-/// DIFFERENT port, because that is the real case -- a browser Prover reaches
-/// the notary's WebSocket endpoint while this bridge dials its TCP wire
-/// listener, and only the host says they mean the same service.
+/// A notary as a request names one: the origin the browser resolved from the
+/// ledger, on the port its own WebSocket session used. That port is not this
+/// bridge's business -- it dials the same host on the wire port, which is a
+/// convention -- and loopback is what makes this one refusable: a private
+/// destination is not dialled unless a deployment has permitted it.
 const NOTARY: &str = "https://127.0.0.1:7048";
 
 /// A request body carrying every field, varying only the two under test.
@@ -802,11 +813,8 @@ async fn github_token_refuses_a_query() {
 async fn github_token_takes_exactly_one_media_type() {
     // A body the media check passes and the NEXT check refuses, so an
     // accepted media type is proved by a `400` from validation rather than by
-    // whatever an exchange would answer. With a valid body these arms took a
-    // permit and dialled `--notary-url`, which is the production default: on a
-    // machine running a notary there, `cargo test` opened a real MPC-TLS
-    // session to github.com carrying the fixture's client secret. They also
-    // asserted only "not 415", so any answer passed.
+    // whatever an exchange would answer -- and asserted as exactly `400`, not
+    // as "not 415", so an answer from further down cannot pass for admission.
     let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
     for (media, admitted) in [
         ("application/json", true),
@@ -829,94 +837,53 @@ async fn github_token_takes_exactly_one_media_type() {
     }
 }
 
-/// The Prover resolves one notary address and uses it for both sessions, so it
-/// travels in the request. This bridge does not dial what a caller names: it
-/// checks the request names the notary it already serves, and refuses
-/// otherwise -- so nothing caller-supplied reaches a socket.
-/// A body naming the notary this deployment serves, refused by the gate AFTER
-/// the notary check. `codeVerifier` is short, which `validate()` rejects.
-fn admitted_notary_but_invalid_body() -> String {
-    format!(
-        r#"{{"code":"abcdef1234567890","codeVerifier":"tooshort","notaryAddress":"{NOTARY}"}}"#
-    )
+/// A notary on a private address is refused before anything is dialled: a
+/// `403`. A loopback one is dialled -- on the fixture's dead port, so the dial
+/// fails at once and the answer is a `502`.
+#[tokio::test]
+async fn github_token_refuses_a_private_notary_and_dials_a_loopback_one() {
+    let body = format!(
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"https://10.0.0.1:7048"}}"#
+    );
+    let resp = post_token(Some(ORIGIN), body).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let resp = post_token(Some(ORIGIN), valid_body()).await;
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
 
+/// The localhost HTTP exception, exactly as the contract states it: the two
+/// exact hosts and nothing that merely resembles them.
 #[tokio::test]
-async fn github_token_requires_the_notary_it_serves() {
-    // Spelled differently from `--notary-url`, on a different port, and the
-    // same notary: the request carries the WebSocket endpoint a Prover uses,
-    // the bridge dials the TCP wire listener, and the host is what says they
-    // mean one service.
-    // Deliberately NOT `valid_body()`. The notary check runs before
-    // `validate()`, so a body that this deployment's notary admits and the
-    // NEXT gate refuses proves admission without taking a permit or dialling
-    // anything -- which a fully valid body here would do, spending the fixture
-    // client secret against github.com on any machine running a local notary.
-    let resp = post_token(Some(ORIGIN), admitted_notary_but_invalid_body()).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "the served notary must be admitted, and the request refused after it"
-    );
-
-    // A different notary is refused, and refused as such.
-    for other in [
-        "https://notary.lib.id",
-        "https://testnet.notary.lib.id",
-        "https://127.0.0.2:7047",
+async fn github_token_admits_the_localhost_http_exception_and_nothing_like_it() {
+    for admitted in ["http://localhost:7048", "http://127.0.0.1:7048"] {
+        let body = format!(
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{admitted}"}}"#
+        );
+        // Past the gate and dialled, on a port nothing listens on: a `502` is
+        // the origin being admitted, where a `400` would be it refused.
+        let resp = post_token(Some(ORIGIN), body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "{admitted}");
+    }
+    for refused in [
+        "http://127.0.0.2:7048",
+        "http://[::1]:7048",
+        "http://notary.example",
     ] {
         let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{other}"}}"#
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{refused}"}}"#
         );
         let resp = post_token(Some(ORIGIN), body).await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{other}");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{refused}");
     }
 }
 
-/// The configured notary and the one a request names are compared byte for
-/// byte, and they are parsed out of two different schemes.
-///
-/// `url` folds a host's case for its SPECIAL schemes only: `https` gets an
-/// IDNA-normalised host, `tcp` gets the bytes the operator typed. So a
-/// deployment configured `tcp://Testnet.Notary.Lib.ID:7047` held
-/// `"Testnet.Notary.Lib.ID"` while every conforming Prover names
-/// `https://testnet.notary.lib.id`, and every token request was refused `403`
-/// against a caller that was right. The fixture's `127.0.0.1` has no case, so
-/// nothing else in this suite could see it -- and DNS has none either, so the
-/// dial this refuses would have worked.
+/// Public plaintext destinations and non-origin URL components remain refused.
 #[tokio::test]
-async fn github_token_admits_its_notary_however_the_operator_spelled_it() {
-    for spelling in [
-        "tcp://Testnet.Notary.Lib.ID:7047",
-        "tcp://TESTNET.NOTARY.LIB.ID:7047",
-        "tcp://testnet.notary.lib.id:7047",
-    ] {
-        let state = deployment(&["--notary-url", spelling]);
-        let body = format!(
-            r#"{{"code":"{CODE}","codeVerifier":"tooshort","notaryAddress":"https://testnet.notary.lib.id"}}"#
-        );
-        let req = Request::post("/api/v1/ceremony/github-token")
-            .header("content-type", "application/json")
-            .header("origin", ORIGIN)
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app(state).oneshot(req).await.unwrap();
-        // Admitted, then refused by the NEXT gate -- which is how admission is
-        // proved without opening a session.
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "{spelling} names the notary this request does"
-        );
-    }
-}
-
-/// A caller does not get to name a plaintext destination, a path, a credential
-/// or anything else that is not a bare HTTPS origin.
-#[tokio::test]
-async fn github_token_refuses_a_notary_address_that_is_not_a_bare_https_origin() {
+async fn github_token_refuses_an_invalid_notary_origin() {
     for bad in [
-        "http://127.0.0.1:7048",
+        "http://notary.example:7048",
+        "http://127.1:7048",
         "127.0.0.1:7048",
         "https://127.0.0.1:7048/path",
         "https://127.0.0.1:7048?q=1",

@@ -21,8 +21,9 @@ base_url = "https://bridge.example"
 # The path providers redirect back to.
 callback_path = "/auth/callback"
 
-# The notary's TCP wire endpoint: host and port.
-notary_url = "tcp://notary.example:7047"
+# The port of the notary's MPC-TLS wire listener. The notary itself is named
+# by each token request; the bridge dials that host on this port.
+notary_wire_port = 7047
 
 # Application origins admitted to read the public ceremony configuration, each
 # in canonical form: no trailing slash, lowercase host, no default port.

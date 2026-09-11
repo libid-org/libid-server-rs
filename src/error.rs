@@ -41,18 +41,23 @@ pub enum Error {
         detail: String,
     },
 
+    /// The request named a notary this deployment will not dial.
+    ///
+    /// Told apart from a connection failure because it is not one: nothing was
+    /// dialled. The name resolved to a private or internal address and the
+    /// operator has not permitted that one -- the egress policy the contract
+    /// asks for where the destination is the caller's.
+    #[error("refused to dial the notary: {detail}")]
+    NotaryRefused {
+        /// Why, in this service's own words.
+        detail: String,
+    },
+
     /// Connecting to the notary failed.
     #[error("failed to connect to notary at {addr}: {detail}")]
     NotaryConnect {
         /// The notary address that was dialled.
         addr: String,
-        /// Human-readable failure detail.
-        detail: String,
-    },
-
-    /// The notary URL was malformed.
-    #[error("invalid notary URL: {detail}")]
-    NotaryUrl {
         /// Human-readable failure detail.
         detail: String,
     },

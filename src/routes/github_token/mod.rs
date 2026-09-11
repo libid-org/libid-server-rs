@@ -50,18 +50,20 @@ use crate::{
     state::GithubExchange,
 };
 
+/// The notarized session that carries it, and what the notary hands back.
+mod egress;
 /// What this service sends, and the endpoint it sends it to.
 mod request;
-/// The notarized session that carries it, and what the notary hands back.
 mod session;
+
+pub use egress::NotaryEgress;
 /// What the session discloses, and what the platform answered.
 mod transcript;
 
 pub(crate) use request::force_token_endpoint;
 
-/// What the browser sends. Nothing else: this service uses only its own
-/// compiled client, secret, redirect URI, endpoint and notary, and accepts no
-/// caller-selected action, client, redirect, endpoint or return URL.
+/// What the browser sends: the code, the PKCE verifier and the notary. The
+/// client, secret, redirect URI and endpoint are this service's own.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct TokenRequestBody {
@@ -69,12 +71,9 @@ pub(crate) struct TokenRequestBody {
     code: String,
     /// The PKCE verifier the browser derived for this ceremony.
     code_verifier: String,
-    /// The Notary Service origin the Prover already resolved.
-    ///
-    /// It travels in the request rather than being configured because one
-    /// resolution has to serve both sessions: a bridge that re-derived it could
-    /// disagree with the browser about which notary signed, and the two
-    /// attestations would then name different services.
+    /// The notary the browser's identity session ran against, as a canonical
+    /// origin: HTTPS, or HTTP on exactly `localhost` or `127.0.0.1`. This
+    /// bridge dials its host on the wire port for the token session.
     notary_address: String,
 }
 
@@ -153,6 +152,18 @@ impl TokenError {
                 Self {
                     status: StatusCode::BAD_GATEWAY,
                     message: "token exchange failed".into(),
+                }
+            }
+            // Refused before any socket was opened: the caller named a notary
+            // on a private or internal address this deployment has not
+            // permitted. Its own sentence, safe to write whole.
+            Error::NotaryRefused { .. } => {
+                tracing::warn!(%cause, "refused to dial the notary a request named");
+                Self {
+                    status: StatusCode::FORBIDDEN,
+                    message:
+                        "this bridge does not dial private or internal notary addresses"
+                            .into(),
                 }
             }
             Error::Tlsn(e) => Self::foreign(&e),
@@ -317,40 +328,13 @@ pub(crate) async fn github_token(
             message: "the request body is not a TokenRequest".into(),
         }
     })?;
-    // The notary the Prover resolved must be the one this deployment serves.
-    //
-    // The contract makes this destination request-controlled and leaves egress
-    // safeguards to carry the weight. This bridge does not dial a
-    // caller-supplied host at all: it checks the request names the notary it is
-    // already configured for, and refuses otherwise. Nothing caller-chosen ever
-    // reaches a socket, so the SSRF surface the contract warns about does not
-    // open here -- and when the transport moves to `wss://{notaryAddress}` the
-    // configured value is what disappears, not this check.
-    //
-    // Compared by HOST, not `host:port`. The two name one service over
-    // different transports and therefore different ports: a browser Prover
-    // reaches the notary's WebSocket endpoint, this bridge dials its TCP wire
-    // listener, and a deployment that runs both on one host is the normal
-    // case. Requiring the ports to agree would refuse every such deployment.
-    //
-    // Nothing is lost by ignoring it: this bridge dials its CONFIGURED address
-    // whatever the request says, so the port in the request is not a
-    // destination and never was. What the check establishes is that the caller
-    // and this deployment mean the same notary.
-    let asked = notary_host(&body.notary_address).ok_or_else(|| {
-        TokenError::bad_request("notaryAddress is not a canonical HTTPS origin")
+    // The spelling is checked here; where the host resolves, and whether it
+    // is dialled, is decided in `egress` after the permit is taken.
+    let notary_host = notary_host(&body.notary_address).ok_or_else(|| {
+        TokenError::bad_request(
+            "notaryAddress is not a canonical HTTPS or localhost HTTP origin",
+        )
     })?;
-    if asked != github.notary.host {
-        tracing::warn!(
-            asked = %asked,
-            serves = %github.notary.host,
-            "refused a token request naming a notary this deployment does not serve"
-        );
-        return Err(TokenError {
-            status: StatusCode::FORBIDDEN,
-            message: "this bridge does not serve the notary this request names".into(),
-        });
-    }
 
     let request = TokenRequest {
         code: body.code,
@@ -375,7 +359,7 @@ pub(crate) async fn github_token(
         message: "too many exchanges in flight; retry shortly".into(),
     })?;
 
-    let response = session::exchange(&github, &request)
+    let response = session::exchange(&github, &request, &notary_host)
         .await
         .map_err(TokenError::from_exchange)?;
     // The bounds are checked on the way out as well as in: the three values are
@@ -402,16 +386,28 @@ pub(crate) async fn github_token(
         .into_response())
 }
 
-/// The host a canonical HTTPS notary origin names, or `None`.
+/// How every byte string in the response is spelled: unpadded URL-safe base64.
 ///
-/// Deliberately narrow, because this value arrives in a request: HTTPS only, no
-/// credentials, path, query or fragment, and a host whose bytes are what a host
-/// is made of. It is the same shape [`crate::canonical_origin`] holds a
-/// configured origin to, minus that function's development exception for
-/// loopback `http` -- a caller does not get to name a plaintext destination.
+/// All three byte strings of the response are spelled this way, and a browser
+/// that decodes one differently from another gets a proof that will not verify.
+/// The bearer is not among them: it is a string GitHub chose, not bytes.
+fn b64(bytes: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// What every layout in this module is a function of: the credentials and the
+/// request, and nothing else the route holds.
+///
+/// Shared because the same transcript is the subject of two modules — the one
+/// that writes it and the one that reads it.
+/// The host a notary origin names. HTTP is development-only on explicit
+/// localhost/127.0.0.1, matching the browser's local transport exception.
 fn notary_host(spelling: &str) -> Option<String> {
     let url = url::Url::parse(spelling).ok()?;
-    if url.scheme() != "https"
+    if !(url.scheme() == "https"
+        || (url.scheme() == "http"
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+            && url.origin().ascii_serialization() == spelling))
         || !matches!(url.path(), "" | "/")
         || url.query().is_some()
         || url.fragment().is_some()
@@ -430,20 +426,6 @@ fn notary_host(spelling: &str) -> Option<String> {
     Some(host.to_owned())
 }
 
-/// How every byte string in the response is spelled: unpadded URL-safe base64.
-///
-/// All three byte strings of the response are spelled this way, and a browser
-/// that decodes one differently from another gets a proof that will not verify.
-/// The bearer is not among them: it is a string GitHub chose, not bytes.
-fn b64(bytes: &[u8]) -> String {
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// What every layout in this module is a function of: the credentials and the
-/// request, and nothing else the route holds.
-///
-/// Shared because the same transcript is the subject of two modules — the one
-/// that writes it and the one that reads it.
 #[cfg(test)]
 mod fixtures {
     use libid_ceremony::token_exchange::TokenRequest;
@@ -486,6 +468,37 @@ mod fixtures {
 
 #[cfg(test)]
 mod tests {
+    use super::notary_host;
+    #[test]
+    fn plaintext_notary_is_limited_to_explicit_loopback_hosts() {
+        for (origin, host) in [
+            ("http://localhost:4687", "localhost"),
+            ("http://127.0.0.1:4687", "127.0.0.1"),
+            ("https://notary.example", "notary.example"),
+        ] {
+            assert_eq!(notary_host(origin).as_deref(), Some(host));
+        }
+        for origin in [
+            "http://notary.example",
+            "http://localhost.evil.test",
+            "http://127.1:4687",
+            "http://2130706433:4687",
+            "http://0x7f000001:4687",
+            "http://LOCALHOST:4687",
+            "http://localhost:80",
+            "http://localhost:4687/",
+            "http://192.168.1.1",
+            "http://localhost.",
+            "ws://localhost:4687",
+            "http://user@localhost:4687",
+            "http://localhost:4687/path",
+            "http://localhost:4687?x=1",
+            "http://localhost:4687#x",
+        ] {
+            assert_eq!(notary_host(origin), None, "{origin}");
+        }
+    }
+
     use super::*;
 
     use libid_ceremony::token_exchange::{

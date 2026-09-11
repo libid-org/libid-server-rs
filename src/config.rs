@@ -6,7 +6,6 @@ use clap::{
     Parser,
 };
 use serde::Deserialize;
-use url::Url;
 
 use crate::{
     deployment::PlatformProfile,
@@ -44,9 +43,10 @@ pub struct Config {
     #[arg(long, env = "BASE_URL", default_value = "http://127.0.0.1:8722")]
     pub base_url: String,
 
-    /// URL of the notary server (TCP), e.g. `tcp://notary.example:7047`.
-    #[arg(long, env = "NOTARY_URL", default_value = "tcp://127.0.0.1:7047")]
-    pub notary_url: Url,
+    /// The port of the notary's MPC-TLS wire listener. Each token request
+    /// names the notary; this bridge dials that host on this port.
+    #[arg(long, env = "NOTARY_WIRE_PORT", default_value_t = 7047)]
+    pub notary_wire_port: u16,
 
     /// Comma-separated application origins admitted to read the public
     /// ceremony configuration. Nonempty, each in canonical form. Empty means
@@ -102,8 +102,8 @@ pub struct FileConfig {
     pub port: Option<u16>,
     /// [`Config::base_url`].
     pub base_url: Option<String>,
-    /// [`Config::notary_url`].
-    pub notary_url: Option<Url>,
+    /// [`Config::notary_wire_port`].
+    pub notary_wire_port: Option<u16>,
     /// [`Config::allowed_app_origins`], as a list.
     pub allowed_app_origins: Option<Vec<String>>,
     /// [`Config::callback_path`].
@@ -174,8 +174,8 @@ impl Config {
         if defaulted(&matches, "base_url") {
             cfg.base_url = file.base_url.unwrap_or(cfg.base_url);
         }
-        if defaulted(&matches, "notary_url") {
-            cfg.notary_url = file.notary_url.unwrap_or(cfg.notary_url);
+        if defaulted(&matches, "notary_wire_port") {
+            cfg.notary_wire_port = file.notary_wire_port.unwrap_or(cfg.notary_wire_port);
         }
         if defaulted(&matches, "callback_path") {
             cfg.callback_path = file.callback_path.unwrap_or(cfg.callback_path);
@@ -210,7 +210,7 @@ impl std::fmt::Debug for Config {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("base_url", &self.base_url)
-            .field("notary_url", &self.notary_url)
+            .field("notary_wire_port", &self.notary_wire_port)
             .field("allowed_app_origins", &self.allowed_app_origins)
             .field("callback_path", &self.callback_path)
             .field("ccdp_origin", &self.ccdp_origin)
@@ -316,7 +316,7 @@ mod file_tests {
             .expect("the example beside this code");
 
         assert_eq!(cfg.port, 8722);
-        assert_eq!(cfg.notary_url.as_str(), "tcp://notary.example:7047");
+        assert_eq!(cfg.notary_wire_port, 7047);
         assert_eq!(
             cfg.allowed_app_origins,
             "https://app.example,https://wallet.example"
