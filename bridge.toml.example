@@ -1,0 +1,58 @@
+# libID OAuth Bridge configuration.
+#
+# Point the bridge at a copy of this file:
+#
+#     LIBID_CONFIG=/etc/libid/bridge.toml libid-server-rs
+#     libid-server-rs --config ./bridge.toml
+#
+# Every key can be overridden by the environment variable or flag of the same
+# name: flag, then environment variable, then this file, then the default.
+# An unknown key is refused at startup.
+
+# Bind address and port. "0.0.0.0" in a container.
+host = "127.0.0.1"
+port = 8722
+
+# The path providers redirect back to. The registered OAuth callback URL is
+# this bridge's public origin followed by it.
+callback_path = "/auth/callback"
+
+# The port of the notary's MPC-TLS wire listener. The notary itself is named
+# by each token request; the bridge dials that host on this port.
+notary_wire_port = 7047
+
+# Application origins admitted to read the public ceremony configuration, each
+# in canonical form: no trailing slash, lowercase host, no default port.
+allowed_app_origins = ["https://app.example", "https://wallet.example"]
+
+# The CCDP Distribution: the origin serving the Callback artifact and
+# everything the browser runs after it. Omit for the canonical libID
+# Distribution.
+ccdp_origin = "https://lib.id"
+
+# A callback.html obtained from the CCDP Distribution, served instead of the
+# compiled-in one.
+# callback_artifact_path = "/etc/libid/callback.html"
+
+# The GitHub OAuth App client secret, required when a platform below is
+# "github". A file that sets it stays out of version control; the
+# GH_OAUTH_CLIENT_SECRET environment variable overrides it.
+# gh_oauth_client_secret = "..."
+
+# The enabled platforms: one table per platform, with its public client id and
+# the ceremony versions it advertises. The GitHub token exchange implements
+# version 1.
+[[platforms]]
+id = "github"
+client_id = "Iv1.0123456789abcdef"
+versions = [1]
+
+# [[platforms]]
+# id = "google"
+# client_id = "000000000000-xxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
+# versions = [1]
+
+# [[platforms]]
+# id = "x"
+# client_id = "XXXXXXXXXXXXXXXXXXXXXXXXXX"
+# versions = [1]

@@ -1,12 +1,11 @@
-//! Binary entrypoint: parse config, build state, serve.
+//! Binary entrypoint: resolve the configuration, build the state, serve.
 
-use clap::Parser;
 use tracing::info;
 
 use libid_server_rs::{
     build_state,
     config::Config,
-    routes,
+    serve,
 };
 
 #[tokio::main]
@@ -18,23 +17,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let cfg = Config::parse();
-    let allowed_origins = cfg.allowed_origin_patterns();
-    let addr = format!("{}:{}", cfg.host, cfg.port);
+    let cfg = Config::resolve()?;
+    let state = build_state(&cfg)?;
 
-    let state = build_state(&cfg).await?;
-    let app = routes::build_router()
-        .with_state(state)
-        .layer(routes::cors_layer(allowed_origins));
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener =
+        tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;
     info!("libid-server-rs listening on {}", listener.local_addr()?);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("shutting down");
-        })
-        .await?;
+    serve(state, listener, async {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("shutting down");
+    })
+    .await?;
     Ok(())
 }

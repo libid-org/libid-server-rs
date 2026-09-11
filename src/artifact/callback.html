@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>libID</title><body><main id="libid-root"></main><script id="libid-callback-config" type="application/json">__LIBID_CALLBACK_CONFIG__</script><script type="module">
+// The compiled-in artifact: not a working Callback. It copies the provider's
+// return, clears it out of this document's URL, and renders fixed text.
+const query = location.search;
+const fragment = location.hash;
+history.replaceState(null, '', location.pathname);
+
+// Unused: cleared above, read by nothing.
+void query;
+void fragment;
+
+const mount = document.getElementById('libid-root');
+if (mount) {
+  mount.textContent =
+    'This deployment is not serving a ceremony callback yet. Nothing was sent.';
+}
+</script></body></html>

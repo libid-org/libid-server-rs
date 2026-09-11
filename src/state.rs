@@ -1,179 +1,64 @@
-//! Application state shared across request handlers.
+//! What the bridge holds while it runs: configuration read once at startup.
 //!
-//! Everything is in-memory by design: a pending challenge lives for
-//! `challenge_ttl_secs`, its result for the same again, and nothing survives
-//! a restart. There is no database in this backend.
+//! There is no ceremony state. Each request is answered in isolation; up to
+//! [`MAX_CONCURRENT_EXCHANGES`] exchanges run at once and share nothing
+//! mutable. A timeout, a duplicate request, a restart or a lost response
+//! leaves no record.
 
-use std::{
-    collections::HashMap,
-    time::Instant,
-};
+use std::sync::Arc;
 
-use tokio::sync::RwLock;
-use url::Url;
+use tokio::sync::Semaphore;
 
-use crate::{
-    oauth::OAuthCredentials,
-    platform::Platform,
-    types::VerifyResponse,
-};
+use crate::oauth::OAuthCredentials;
 
-/// Pending OAuth challenge awaiting callback.
-pub struct PendingChallenge {
-    /// The hex-encoded compressed public key.
-    pub pubkey_hex: String,
-    /// PKCE code verifier.
-    pub code_verifier: String,
-    /// The platform being authenticated.
-    pub platform: Platform,
-    /// Wallet the proof is made out to.
-    pub link_wallet: [u8; 20],
-    /// When this challenge was created.
-    pub created: Instant,
+/// How many exchanges may be in flight at once. Each is a full MPC-TLS
+/// session and one outbound request carrying the client secret; a request
+/// past the ceiling is shed with `503`.
+pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
+
+/// Everything the confidential exchange needs, and nothing any other route
+/// does. Present exactly when GitHub is enabled: the token route is mounted
+/// with it or not mounted.
+pub struct GithubExchange {
+    /// GitHub's confidential client.
+    pub(crate) credentials: OAuthCredentials,
+    /// The path providers redirect back to. A request's `redirectUri` is the
+    /// bridge's origin followed by exactly this.
+    pub(crate) callback_path: String,
+    /// Dials the notary each token request names, on the wire port; refuses
+    /// private and internal addresses.
+    pub(crate) egress: crate::routes::github_token::NotaryEgress,
+    /// The CCDP Distribution this bridge selects: the only origin the token
+    /// route admits, as the `Origin` header value it is compared with.
+    pub(crate) ccdp_origin: axum::http::HeaderValue,
+    /// The exchange permits, [`MAX_CONCURRENT_EXCHANGES`] of them. A request
+    /// that finds none is shed, not queued.
+    pub(crate) permits: Semaphore,
 }
 
-/// Where a challenge's flow currently stands. Served by the result route.
-pub enum FlowStatus {
-    /// The flow is still running (OAuth done, MPC-TLS in progress, ...).
-    Pending {
-        /// Coarse phase label for the client ("oauth_complete", ...).
-        phase: &'static str,
-    },
-    /// The flow finished; the proof bundle is ready.
-    Complete(Box<VerifyResponse>),
-    /// The flow failed.
-    Failed {
-        /// Human-readable error description.
-        error: String,
-    },
-}
-
-/// A [`FlowStatus`] plus its last-touched time, for TTL sweeping.
-pub struct FlowEntry {
-    /// Current status.
-    pub status: FlowStatus,
-    /// Last state change.
-    pub updated: Instant,
-}
-
-/// Validated runtime configuration (addresses parsed, not raw strings).
-pub struct Runtime {
-    /// Public base URL of this server.
-    pub base_url: String,
-    /// Public web-app URL for the Gmail fragment relay. `None` disables it.
-    pub app_url: Option<String>,
-    /// Notary TCP URL.
-    pub notary_url: Url,
-    /// Expected notary Ethereum address.
-    pub notary_address: [u8; 20],
-    /// EVM chain id bound into the notary digest.
-    pub chain_id: u64,
-    /// Verifier contract address bound into the notary digest
-    /// (`GitHubIdentityVerifier` for the naming deployment).
-    pub verifier_contract: [u8; 20],
-    /// Challenge / result TTL in seconds.
-    pub challenge_ttl_secs: u64,
-}
-
-/// Shared application state.
-///
-/// No signing identity lives here: the service holds no key and signs
-/// nothing. The only secret it handles is the GitHub OAuth client secret,
-/// and the only long-lived trust root in a proof is the notary's key.
+/// Configuration every route reads.
 pub struct AppState {
-    /// Validated runtime configuration.
-    pub runtime: Runtime,
-    /// GitHub OAuth credentials.
-    pub github_oauth: OAuthCredentials,
-    /// Pending OAuth challenges, keyed by challenge hex.
-    pub challenges: RwLock<HashMap<String, PendingChallenge>>,
-    /// Flow results, keyed by challenge hex.
-    pub results: RwLock<HashMap<String, FlowEntry>>,
+    /// The path the providers redirect back to, where the callback document
+    /// answers.
+    pub(crate) callback_path: String,
+    /// The callback document and the policy it is served under, composed once
+    /// at startup.
+    pub(crate) callback: crate::artifact::CallbackDocument,
+    /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: read by
+    /// the configuration route and inserted into the callback document. Exact
+    /// canonical strings, compared against what a browser sends.
+    pub(crate) allowed_origins: Arc<[String]>,
+    /// The public ceremony configuration, serialized once: the exact bytes
+    /// every admitted caller receives.
+    pub(crate) ceremony_config: bytes::Bytes,
+    /// The confidential exchange, present when the deployment enables GitHub.
+    /// `None` means the token route is not mounted.
+    pub(crate) github: Option<Arc<GithubExchange>>,
 }
 
 impl AppState {
-    /// Create a challenge and its pending result slot, sweeping expired
-    /// entries from both maps first.
-    pub async fn create_challenge(
-        &self,
-        challenge_hex: String,
-        pending: PendingChallenge,
-    ) {
-        let ttl = self.runtime.challenge_ttl_secs;
-        {
-            let mut challenges = self.challenges.write().await;
-            challenges.retain(|_, v| v.created.elapsed().as_secs() < ttl);
-            challenges.insert(challenge_hex.clone(), pending);
-        }
-        {
-            let mut results = self.results.write().await;
-            results.retain(|_, v| v.updated.elapsed().as_secs() < ttl);
-            results.insert(
-                challenge_hex,
-                FlowEntry {
-                    status: FlowStatus::Pending {
-                        phase: "waiting_for_authorization",
-                    },
-                    updated: Instant::now(),
-                },
-            );
-        }
+    /// The exchange permits, when GitHub is enabled.
+    pub fn exchange_permits(&self) -> Option<&Semaphore> {
+        self.github.as_ref().map(|g| &g.permits)
     }
-
-    /// Consume a pending challenge by ID. Single-use: a second consume (a
-    /// replayed OAuth callback) returns `None`.
-    pub async fn consume_challenge(
-        &self,
-        challenge_id: &str,
-    ) -> Option<PendingChallenge> {
-        let mut challenges = self.challenges.write().await;
-        challenges.remove(challenge_id)
-    }
-
-    /// Update the flow status for a challenge.
-    pub async fn set_status(&self, challenge_id: &str, status: FlowStatus) {
-        let mut results = self.results.write().await;
-        results.insert(
-            challenge_id.to_string(),
-            FlowEntry {
-                status,
-                updated: Instant::now(),
-            },
-        );
-    }
-
-    /// Read the flow status for a challenge, `None` if unknown or expired.
-    /// Reads do not extend the TTL.
-    pub async fn status_json(&self, challenge_id: &str) -> Option<StatusView> {
-        let results = self.results.read().await;
-        let entry = results.get(challenge_id)?;
-        if entry.updated.elapsed().as_secs() >= self.runtime.challenge_ttl_secs {
-            return None;
-        }
-        Some(match &entry.status {
-            FlowStatus::Pending { phase } => StatusView::Pending { phase },
-            FlowStatus::Complete(resp) => {
-                StatusView::Complete(serde_json::to_value(resp.as_ref()).ok()?)
-            }
-            FlowStatus::Failed { error } => StatusView::Failed {
-                error: error.clone(),
-            },
-        })
-    }
-}
-
-/// A snapshot of a flow's status, detached from the state lock.
-pub enum StatusView {
-    /// Still running.
-    Pending {
-        /// Coarse phase label.
-        phase: &'static str,
-    },
-    /// Finished — the serialized [`VerifyResponse`].
-    Complete(serde_json::Value),
-    /// Failed.
-    Failed {
-        /// Human-readable error description.
-        error: String,
-    },
 }
