@@ -102,14 +102,20 @@ mod tests {
         REDIRECT_URI,
     };
 
+    /// The fixture request as the session sends it, and its layout.
+    fn laid_out(credentials: &OAuthCredentials) -> (Vec<u8>, ceremony::Layout) {
+        let transcript = sent(credentials, &request());
+        let layout =
+            ceremony::Layout::token_request(&transcript, &TOKEN_SESSION).unwrap();
+        (transcript, layout)
+    }
+
     /// Everything that proves this request belongs to the ceremony is
     /// revealed; the secret is committed, as a suffix.
     #[test]
     fn the_secret_is_the_only_thing_the_request_hides() {
         let credentials = credentials("ghs_averyrealisticlookingclientsecret00");
-        let transcript = sent(&credentials, &request());
-        let layout =
-            ceremony::Layout::token_request(&transcript, &TOKEN_SESSION).unwrap();
+        let (transcript, layout) = laid_out(&credentials);
 
         assert_eq!(layout.reveal.len(), 1, "one revealed prefix");
         assert_eq!(layout.reveal[0].start, 0);
@@ -154,9 +160,7 @@ mod tests {
         assert_eq!(pairs[4].0, SECRET_FIELD);
         assert_eq!(pairs[4].1, secret, "and it round-trips unmangled");
 
-        let transcript = sent(&credentials, &request());
-        let layout =
-            ceremony::Layout::token_request(&transcript, &TOKEN_SESSION).unwrap();
+        let (transcript, layout) = laid_out(&credentials);
         assert_eq!(layout.reveal.len(), 1);
 
         // The secret as it appears on the wire, percent-encoded.

@@ -19,7 +19,11 @@ use std::sync::Arc;
 
 use axum::{
     extract::DefaultBodyLimit,
-    http::HeaderValue,
+    http::{
+        header,
+        HeaderName,
+        HeaderValue,
+    },
     routing::{
         get,
         post,
@@ -57,17 +61,20 @@ impl<'a> Origins<'a> {
     }
 }
 
-/// Liveness probe: `OK`, `nosniff`, `no-store`. Not one of the contract's
-/// three routes; the published image's `HEALTHCHECK` targets it. It is the one
-/// route that accepts a query.
-async fn health() -> impl axum::response::IntoResponse {
+/// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, on every
+/// response this service writes.
+pub(crate) const ON_EVERY_RESPONSE: [(HeaderName, HeaderValue); 2] = [
+    (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
     (
-        [
-            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            (axum::http::header::CACHE_CONTROL, "no-store"),
-        ],
-        "OK",
-    )
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    ),
+];
+
+/// Liveness probe: `OK`. Not one of the contract's three routes; the published
+/// image's `HEALTHCHECK` targets it. It is the one route that accepts a query.
+async fn health() -> impl axum::response::IntoResponse {
+    (ON_EVERY_RESPONSE, "OK")
 }
 
 /// The liveness probe. The configured callback path is refused when it

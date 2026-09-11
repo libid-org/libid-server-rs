@@ -16,6 +16,7 @@ use axum::{
     },
 };
 
+use super::ON_EVERY_RESPONSE;
 use crate::state::AppState;
 
 /// `GET {callback path}`.
@@ -23,6 +24,7 @@ pub(crate) async fn callback(State(state): State<Arc<AppState>>) -> Response {
     // The borrow guard is released before the response is built.
     let published = state.callback.borrow().clone();
     (
+        ON_EVERY_RESPONSE,
         [
             // `unsafe-none` keeps the opener the application holds.
             (
@@ -30,8 +32,6 @@ pub(crate) async fn callback(State(state): State<Arc<AppState>>) -> Response {
                 "unsafe-none",
             ),
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            (header::CACHE_CONTROL, "no-store"),
             (header::REFERRER_POLICY, "no-referrer"),
         ],
         // Computed when the document was composed, over the bytes served.

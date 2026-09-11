@@ -378,14 +378,10 @@ pub(crate) async fn refresh(state: Arc<AppState>, schedule: Schedule) {
         match revalidate(&state, upstream).await {
             Ok(replaced) => {
                 if replaced {
-                    let published = state.callback.borrow();
-                    tracing::info!(
-                        url,
-                        etag = published.etag.as_deref().unwrap_or("<none>"),
-                        policy =
-                            published.document.csp.to_str().unwrap_or("<unreadable>"),
-                        "the callback artifact was replaced"
-                    );
+                    state
+                        .callback
+                        .borrow()
+                        .log(&url, "the callback artifact was replaced");
                 } else {
                     tracing::debug!(url, "the callback artifact is unchanged");
                 }
@@ -485,6 +481,15 @@ mod tests {
             .unwrap()
     }
 
+    /// A healthy Distribution, a deployment pointed at it, and what that
+    /// deployment published at startup.
+    async fn deployed() -> (Distribution, Arc<AppState>, Arc<Published>) {
+        let distribution = Distribution::healthy().await;
+        let state = bridge(&distribution).await;
+        let before = state.callback.borrow().clone();
+        (distribution, state, before)
+    }
+
     /// A deployment pointed at this test's own Distribution.
     fn config(ccdp_origin: &str) -> crate::config::Config {
         crate::config::Config::fixture(&["--ccdp-origin", ccdp_origin])
@@ -541,9 +546,7 @@ mod tests {
     /// A Distribution that has nothing new says so, and nothing is republished.
     #[tokio::test]
     async fn an_unchanged_artifact_leaves_the_published_document_alone() {
-        let distribution = Distribution::healthy().await;
-        let state = bridge(&distribution).await;
-        let before = state.callback.borrow().clone();
+        let (distribution, state, before) = deployed().await;
 
         let replaced = revalidate(&state, &upstream(&distribution)).await.unwrap();
         assert!(!replaced, "a 304 replaces nothing");
@@ -554,9 +557,7 @@ mod tests {
     /// A failed refresh retains the last valid result and its validator.
     #[tokio::test]
     async fn an_artifact_that_will_not_scan_retains_the_last_valid_one() {
-        let distribution = Distribution::healthy().await;
-        let state = bridge(&distribution).await;
-        let before = state.callback.borrow().clone();
+        let (distribution, state, before) = deployed().await;
 
         distribution.now_serves(Reply {
             etag: Some("W/\"the-replacement\""),
@@ -579,9 +580,7 @@ mod tests {
     /// document, a new policy and a new validator, all at once.
     #[tokio::test]
     async fn a_new_artifact_replaces_the_published_one_whole() {
-        let distribution = Distribution::healthy().await;
-        let state = bridge(&distribution).await;
-        let before = state.callback.borrow().clone();
+        let (distribution, state, before) = deployed().await;
         distribution.now_serves(Reply::replacement());
 
         assert!(revalidate(&state, &upstream(&distribution)).await.unwrap());
@@ -610,9 +609,7 @@ mod tests {
     /// loop reaches the third.
     #[tokio::test]
     async fn the_loop_survives_a_failed_refresh_and_replaces_on_a_later_one() {
-        let distribution = Distribution::healthy().await;
-        let state = bridge(&distribution).await;
-        let before = state.callback.borrow().clone();
+        let (distribution, state, before) = deployed().await;
 
         // Answered in order, then the standing replacement.
         distribution.answers_next(Reply {

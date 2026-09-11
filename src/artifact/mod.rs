@@ -133,13 +133,18 @@ impl Published {
                     "answered 304 Not Modified to a request carrying no If-None-Match"
                         .into(),
             })?;
+        published.log(&url, "retrieved the callback artifact");
+        Ok(published)
+    }
+
+    /// One log line naming the document: its URL, validator and policy.
+    pub(crate) fn log(&self, url: &str, event: &str) {
         tracing::info!(
             url,
-            etag = published.etag.as_deref().unwrap_or("<none>"),
-            policy = published.document.csp.to_str().unwrap_or("<unreadable>"),
-            "retrieved the callback artifact"
+            etag = self.etag.as_deref().unwrap_or("<none>"),
+            policy = self.document.csp.to_str().unwrap_or("<unreadable>"),
+            "{event}"
         );
-        Ok(published)
     }
 }
 
