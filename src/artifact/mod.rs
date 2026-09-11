@@ -21,13 +21,8 @@ use scan::{
     Layout,
 };
 
-/// A minimal artifact for tests: one configuration slot, one executable
-/// module, one mount point.
 #[cfg(test)]
-pub(crate) const FIXTURE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/callback.html"
-));
+pub(crate) use crate::fixtures::ARTIFACT as FIXTURE;
 
 /// What the deployment contributes to the document and its policy.
 pub(crate) struct DeploymentInputs<'a> {

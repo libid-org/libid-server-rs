@@ -10,6 +10,8 @@ description = "libID OAuth Bridge: publishes the ceremony configuration, serves 
 publish = false
 
 [dependencies]
+# A fixture Distribution answering with a chunked body.
+futures-util = { version = "0.3", optional = true }
 # ── libid-rs shared crates ──────────────────────────────────────────────
 # Three crates, one source, one revision. Two of them are also on crates.io,
 # but libid-tlsn is git-only (its upstream `tlsn` dep is not on crates.io) and
@@ -96,12 +98,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
+[features]
+# The test fixtures (`libid_server_rs::fixtures`), for the integration tests.
+fixtures = ["dep:futures-util"]
+
 [dev-dependencies]
+libid-server-rs = { path = ".", features = ["fixtures"] }
 tower = { version = "0.5", features = ["util"] }
 # Paused time, for the tests that wait out a budget.
 tokio = { version = "1", features = ["test-util"] }
-# A fixture Distribution answering with a chunked body.
-futures-util = "0.3"
 # A self-signed certificate for a fixture Distribution that speaks TLS.
 rcgen = "0.13"
 

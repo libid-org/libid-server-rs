@@ -1639,6 +1639,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libid-ceremony",
+ "libid-server-rs",
  "libid-tlsn",
  "libid-transcript",
  "rcgen",

@@ -47,7 +47,7 @@ use super::{
 use crate::state::AppState;
 
 /// The artifact's path under the CCDP origin.
-const ARTIFACT_PATH: &str = "/ccdp/callback.html";
+pub(crate) const ARTIFACT_PATH: &str = "/ccdp/callback.html";
 
 /// How long opening the transport may take: resolution, the connection, and
 /// the TLS handshake over it.
@@ -421,166 +421,17 @@ async fn revalidate(
     Ok(true)
 }
 
-/// The fixture Distribution, for every test in the crate that retrieves.
-#[cfg(test)]
-pub(crate) use tests::Distribution;
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
-    use axum::{
-        extract::State,
-        response::IntoResponse,
-        routing::get,
-        Router,
-    };
-    use hyper::HeaderMap;
-
     use super::*;
+    use crate::fixtures::{
+        Distribution,
+        Reply,
+    };
 
-    /// What the fixture Distribution answers with next.
-    #[derive(Clone)]
-    struct Reply {
-        status: StatusCode,
-        media: &'static str,
-        etag: Option<&'static str>,
-        body: String,
-        /// A `Content-Encoding` to claim, for a Distribution that ignores what
-        /// the request admitted.
-        encoding: Option<&'static str>,
-        /// Send the body with no `content-length`, as a chunked answer does.
-        chunked: bool,
-    }
-
-    impl Reply {
-        /// The same artifact under a new validator.
-        fn replacement() -> Reply {
-            Reply {
-                etag: Some("W/\"the-replacement\""),
-                ..Reply::artifact()
-            }
-        }
-
-        /// The artifact, as a healthy Distribution serves it.
-        fn artifact() -> Reply {
-            Reply {
-                status: StatusCode::OK,
-                media: "text/html; charset=utf-8",
-                etag: Some("W/\"the-artifact\""),
-                body: super::super::FIXTURE.to_owned(),
-                encoding: None,
-                chunked: false,
-            }
-        }
-    }
-
-    /// A Distribution, on loopback and in plaintext.
-    pub(crate) struct Distribution {
-        origin: String,
-        answers: Answers,
-    }
-
-    /// What the fixture has been told to say, and what it has been asked.
-    #[derive(Clone)]
-    struct Answers {
-        /// Every request the fixture saw, in order.
-        seen: Arc<Mutex<Vec<HeaderMap>>>,
-        /// What it answers when nothing is queued.
-        standing: Arc<Mutex<Reply>>,
-        /// Answers for the next requests, ahead of the standing one.
-        queued: Arc<Mutex<std::collections::VecDeque<Reply>>>,
-    }
-
-    impl Distribution {
-        async fn serving(reply: Reply) -> Distribution {
-            let answers = Answers {
-                seen: Arc::default(),
-                standing: Arc::new(Mutex::new(reply)),
-                queued: Arc::default(),
-            };
-            let router = Router::new()
-                .route(ARTIFACT_PATH, get(answer))
-                .with_state(answers.clone());
-            // Served on the fixture runtime, which outlives the test that
-            // started it.
-            let (bound, address) = tokio::sync::oneshot::channel();
-            crate::fixtures::runtime().spawn(async move {
-                let listener =
-                    tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let _ = bound.send(listener.local_addr().unwrap());
-                let _ = axum::serve(listener, router).await;
-            });
-            let origin = format!("http://{}", address.await.unwrap());
-            Distribution { origin, answers }
-        }
-
-        /// Serving the artifact.
-        pub(crate) async fn healthy() -> Distribution {
-            Distribution::serving(Reply::artifact()).await
-        }
-
-        /// Where it is, as a deployment's `--ccdp-origin`.
-        pub(crate) fn origin(&self) -> &str {
-            &self.origin
-        }
-
-        fn now_serves(&self, reply: Reply) {
-            *self.answers.standing.lock().unwrap() = reply;
-        }
-
-        /// Answer the next request with this, once.
-        fn answers_next(&self, reply: Reply) {
-            self.answers.queued.lock().unwrap().push_back(reply);
-        }
-
-        fn upstream(&self) -> Upstream {
-            Upstream::new(&self.origin).expect("a loopback origin parses")
-        }
-
-        /// How many queued answers are still waiting to be given.
-        fn still_queued(&self) -> usize {
-            self.answers.queued.lock().unwrap().len()
-        }
-
-        fn requests(&self) -> Vec<HeaderMap> {
-            self.answers.seen.lock().unwrap().clone()
-        }
-    }
-
-    async fn answer(
-        State(answers): State<Answers>,
-        headers: HeaderMap,
-    ) -> axum::response::Response {
-        answers.seen.lock().unwrap().push(headers.clone());
-        let reply = match answers.queued.lock().unwrap().pop_front() {
-            Some(queued) => queued,
-            None => answers.standing.lock().unwrap().clone(),
-        };
-        // Only a `200` revalidates into a `304`.
-        let asked = headers
-            .get(header::IF_NONE_MATCH)
-            .and_then(|v| v.to_str().ok());
-        if reply.status == StatusCode::OK && reply.etag.is_some() && asked == reply.etag {
-            return StatusCode::NOT_MODIFIED.into_response();
-        }
-        let mut response = axum::response::Response::builder()
-            .status(reply.status)
-            .header(header::CONTENT_TYPE, reply.media);
-        if let Some(etag) = reply.etag {
-            response = response.header(header::ETAG, etag);
-        }
-        if let Some(encoding) = reply.encoding {
-            response = response.header(header::CONTENT_ENCODING, encoding);
-        }
-        let body = if reply.chunked {
-            axum::body::Body::from_stream(futures_util::stream::iter([Ok::<_, String>(
-                bytes::Bytes::from(reply.body),
-            )]))
-        } else {
-            axum::body::Body::from(reply.body)
-        };
-        response.body(body).unwrap().into_response()
+    /// A Distribution as a deployment retrieves from it.
+    fn upstream(distribution: &Distribution) -> Upstream {
+        Upstream::new(distribution.origin()).expect("a loopback origin parses")
     }
 
     /// An `https` origin that presents a certificate nothing trusts.
@@ -626,7 +477,7 @@ mod tests {
     /// A deployment pointed at a fixture Distribution, built through
     /// `build_state`.
     async fn bridge(distribution: &Distribution) -> Arc<AppState> {
-        crate::build_state(&config(&distribution.origin))
+        crate::build_state(&config(distribution.origin()))
             .await
             .unwrap()
     }
@@ -669,7 +520,8 @@ mod tests {
             ..Reply::artifact()
         })
         .await;
-        let Err(refusal) = crate::build_state(&config(&distribution.origin)).await else {
+        let Err(refusal) = crate::build_state(&config(distribution.origin())).await
+        else {
             panic!("a deployment with no artifact must not build")
         };
         assert!(
@@ -678,7 +530,7 @@ mod tests {
             "{refusal}"
         );
         assert!(
-            format!("{refusal}").contains(&distribution.origin),
+            format!("{refusal}").contains(distribution.origin()),
             "{refusal}"
         );
     }
@@ -690,7 +542,7 @@ mod tests {
         let state = bridge(&distribution).await;
         let before = state.callback.borrow().clone();
 
-        let replaced = revalidate(&state, &distribution.upstream()).await.unwrap();
+        let replaced = revalidate(&state, &upstream(&distribution)).await.unwrap();
         assert!(!replaced, "a 304 replaces nothing");
         // The same value, not an equal one: nothing was composed again.
         assert!(Arc::ptr_eq(&before, &state.callback.borrow()));
@@ -708,7 +560,7 @@ mod tests {
             body: "<!doctype html><body><p>not an artifact".to_owned(),
             ..Reply::artifact()
         });
-        let refusal = revalidate(&state, &distribution.upstream())
+        let refusal = revalidate(&state, &upstream(&distribution))
             .await
             .expect_err("an artifact with no slot is not serveable");
         assert!(matches!(refusal, FetchError::Artifact(_)), "{refusal}");
@@ -729,7 +581,7 @@ mod tests {
         let before = state.callback.borrow().clone();
         distribution.now_serves(Reply::replacement());
 
-        assert!(revalidate(&state, &distribution.upstream()).await.unwrap());
+        assert!(revalidate(&state, &upstream(&distribution)).await.unwrap());
 
         let after = state.callback.borrow().clone();
         assert!(!Arc::ptr_eq(&before, &after));
@@ -793,7 +645,7 @@ mod tests {
             ..Reply::artifact()
         });
 
-        let refusal = revalidate(&state, &distribution.upstream())
+        let refusal = revalidate(&state, &upstream(&distribution))
             .await
             .expect_err("a redirect is not an artifact");
         assert!(
@@ -817,7 +669,7 @@ mod tests {
             })
             .await;
             let refusal = refused(
-                distribution.upstream(),
+                upstream(&distribution),
                 &format!("chunked={chunked}: an oversize body is refused"),
             )
             .await;
@@ -846,7 +698,7 @@ mod tests {
             })
             .await;
             let refusal =
-                refused(distribution.upstream(), "this is not the artifact").await;
+                refused(upstream(&distribution), "this is not the artifact").await;
             assert!(
                 matches!(refusal, FetchError::Media(_)),
                 "{media:?}: {refusal}"
@@ -880,7 +732,7 @@ mod tests {
     async fn the_request_carries_nothing_a_deployment_did_not_configure() {
         let distribution = Distribution::healthy().await;
         let state = bridge(&distribution).await;
-        revalidate(&state, &distribution.upstream()).await.unwrap();
+        revalidate(&state, &upstream(&distribution)).await.unwrap();
 
         let requests = distribution.requests();
         let [first, second] = &requests[..] else {
@@ -918,7 +770,7 @@ mod tests {
         let runtime = || tokio::runtime::Runtime::new().unwrap();
         let distribution = runtime().block_on(Distribution::healthy());
         let published =
-            runtime().block_on(distribution.upstream().retrieve(&origins(), None));
+            runtime().block_on(upstream(&distribution).retrieve(&origins(), None));
         assert!(published.unwrap().is_some());
     }
     /// A peer presenting a certificate the compiled-in anchors do not carry is
@@ -966,7 +818,7 @@ mod tests {
         })
         .await;
         let refusal = refused(
-            distribution.upstream(),
+            upstream(&distribution),
             "an encoded body is not the artifact this bridge would hash",
         )
         .await;
@@ -984,7 +836,7 @@ mod tests {
         })
         .await;
         let refusal = refused(
-            distribution.upstream(),
+            upstream(&distribution),
             "an unasked 304 leaves nothing to serve",
         )
         .await;
@@ -992,7 +844,7 @@ mod tests {
             matches!(refusal, FetchError::UnaskedNotModified),
             "{refusal}"
         );
-        assert!(crate::build_state(&config(&distribution.origin))
+        assert!(crate::build_state(&config(distribution.origin()))
             .await
             .is_err());
     }

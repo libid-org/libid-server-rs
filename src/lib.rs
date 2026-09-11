@@ -18,6 +18,9 @@ pub(crate) mod artifact;
 pub mod config;
 pub(crate) mod deployment;
 pub mod error;
+#[cfg(any(test, feature = "fixtures"))]
+#[doc(hidden)]
+pub mod fixtures;
 pub(crate) mod oauth;
 pub mod routes;
 pub mod state;
@@ -306,105 +309,6 @@ fn callback_path(path: &str) -> Result<String> {
         return Err(refuse("collides with a route this service already serves"));
     }
     Ok(path.to_owned())
-}
-
-/// What every test in this crate builds a deployment from. `tests/http.rs`
-/// keeps its own copy: an integration test cannot see a `#[cfg(test)]` item.
-#[cfg(test)]
-pub(crate) mod fixtures {
-    use std::sync::{
-        LazyLock,
-        OnceLock,
-    };
-
-    use crate::{
-        artifact::upstream::Distribution,
-        config,
-    };
-
-    /// The runtime shared fixtures are served on. `#[tokio::test]` drops each
-    /// test's runtime, and every task on it, when the test returns; this one
-    /// is never dropped.
-    pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
-        static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("a runtime for the shared fixtures")
-        });
-        &RUNTIME
-    }
-
-    /// One Distribution on loopback serving the fixture artifact, started once
-    /// and shared by every test that builds a deployment.
-    pub(crate) fn distribution() -> &'static Distribution {
-        static SHARED: OnceLock<Distribution> = OnceLock::new();
-        SHARED.get_or_init(|| {
-            std::thread::scope(|scope| {
-                scope
-                    .spawn(|| runtime().block_on(Distribution::healthy()))
-                    .join()
-                    .expect("the shared Distribution starts")
-            })
-        })
-    }
-
-    /// A loopback port nothing listens on, bound once and released: a session
-    /// a test does start fails at the dial instead of reaching a notary on
-    /// this machine.
-    fn dead_port() -> &'static str {
-        static PORT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        PORT.get_or_init(|| {
-            let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            free.local_addr().unwrap().port().to_string()
-        })
-    }
-
-    /// A deployment that starts, with `args` replacing any default it names.
-    ///
-    /// Every flag that reads an environment variable is listed, so the
-    /// process environment reaches nothing. `--platforms` is this fixture's
-    /// own: the JSON records go to `Config::platforms`, which the binary
-    /// fills from the configuration file. The CCDP origin is the shared
-    /// Distribution's unless `args` names another.
-    pub(crate) fn config(args: &[&str]) -> config::Config {
-        let mut flags: Vec<(&str, &str)> = vec![
-            ("--host", "127.0.0.1"),
-            ("--port", "8722"),
-            ("--notary-wire-port", dead_port()),
-            ("--callback-path", "/auth/callback"),
-            ("--allowed-app-origins", "https://app.example"),
-            ("--ccdp-origin", distribution().origin()),
-            (
-                "--platforms",
-                r#"[{"id":"github","client_id":"Iv1.0123456789abcdef","versions":[1]}]"#,
-            ),
-            ("--gh-oauth-client-secret", "ghs_secret"),
-        ];
-        for pair in args.chunks(2) {
-            let [flag, value] = pair else {
-                panic!("test flags come in pairs, got {pair:?}")
-            };
-            match flags.iter_mut().find(|(f, _)| f == flag) {
-                Some(slot) => slot.1 = value,
-                None => flags.push((flag, value)),
-            }
-        }
-        let platforms = flags
-            .iter()
-            .position(|(f, _)| *f == "--platforms")
-            .map(|i| flags.remove(i).1)
-            .expect("the fixture lists --platforms");
-        let mut argv = vec!["libid-server-rs"];
-        for (flag, value) in &flags {
-            argv.push(flag);
-            argv.push(value);
-        }
-        let mut cfg = <config::Config as clap::Parser>::parse_from(argv);
-        cfg.platforms =
-            serde_json::from_str(platforms).expect("the fixture's platform records");
-        cfg
-    }
 }
 
 #[cfg(test)]
