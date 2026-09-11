@@ -22,10 +22,10 @@ futures-util = { version = "0.3", optional = true }
 # libid-signer is deliberately absent, and with it the AWS SDK: this service
 # holds no signing key. Nothing else here needs it — the notary digest is
 # only ever verified, never signed.
-# Match notary v0.3.0-rc.3 plus JSON-whitespace transcript support.
-libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1" }
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1" }
-libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1" }
+# Released whitespace-aware transcripts; patches below retain the RC3 notary runtime.
+libid-ceremony = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 # Upstream TLSNotary is NOT a direct dependency. Everything this service reads
 # off a session — `CommitmentOpening` and the `Direction` it carries — comes
 # re-exported from libid-tlsn. What libid-tlsn pins is then overridden by the

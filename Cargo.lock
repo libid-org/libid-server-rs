@@ -1600,8 +1600,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libid-ceremony"
-version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1#5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1"
+version = "0.4.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
 dependencies = [
  "bincode 2.0.1",
  "libid-crypto",
@@ -1610,8 +1610,8 @@ dependencies = [
 
 [[package]]
 name = "libid-crypto"
-version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1#5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1"
+version = "0.4.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
 dependencies = [
  "hex",
  "k256",
@@ -1622,9 +1622,9 @@ dependencies = [
 
 [[package]]
 name = "libid-profiles"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dab7ecd48e0d3c233192f235e4cc6f90dc6b62fe6ffb9903d99120e6f70c895"
+checksum = "b500f5875925c4bce39377730a0ffc8f66dd4d623fc7c1555411b48b2076530e"
 
 [[package]]
 name = "libid-server-rs"
@@ -1660,8 +1660,8 @@ dependencies = [
 
 [[package]]
 name = "libid-tlsn"
-version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1#5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1"
+version = "0.4.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -1678,8 +1678,8 @@ dependencies = [
 
 [[package]]
 name = "libid-transcript"
-version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1#5bed8f2d405f84bdbd4f4a1ca54910aa5733bce1"
+version = "0.4.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
 dependencies = [
  "httparse",
  "libid-profiles",
