@@ -12,7 +12,10 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use libid_server_rs::{
-    fixtures,
+    fixtures::{
+        self,
+        Distribution,
+    },
     routes,
     state::AppState,
 };
@@ -23,7 +26,7 @@ const APP_ORIGIN: &str = "https://app.example";
 /// The shared Distribution's origin: the deployment's CCDP origin, and so the
 /// one origin the token route admits and the callback document names.
 fn ccdp_origin() -> &'static str {
-    fixtures::distribution().origin()
+    Distribution::shared().origin()
 }
 
 /// A deployment admitting two applications, with `overrides` replacing any
@@ -34,7 +37,7 @@ async fn deployment(overrides: &[&str]) -> Arc<AppState> {
         "https://app.example,https://wallet.example",
     ];
     args.extend_from_slice(overrides);
-    fixtures::deployment(&args).await
+    AppState::fixture(&args).await
 }
 
 /// The default deployment: GitHub enabled, the full exchange ceiling free.

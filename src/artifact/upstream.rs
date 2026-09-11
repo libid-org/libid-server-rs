@@ -284,7 +284,7 @@ impl Upstream {
             s => return Err(FetchError::Status(s)),
         }
 
-        artifact(response).await
+        Fetched::of(response).await
     }
 
     /// The request: no cookie, credential or query, and `Accept-Encoding:
@@ -323,38 +323,41 @@ fn is_html(media: &str) -> bool {
         )
 }
 
-/// Read an artifact out of a `200`.
-async fn artifact(
-    response: hyper::Response<hyper::body::Incoming>,
-) -> Result<Fetched, FetchError> {
-    let (parts, body) = response.into_parts();
-    let header =
-        |name: header::HeaderName| parts.headers.get(name).and_then(|v| v.to_str().ok());
-    let media = header(header::CONTENT_TYPE).unwrap_or_default();
-    if !is_html(media) {
-        return Err(FetchError::Media(media.to_owned()));
-    }
-    // The request admitted `identity` alone; an encoded body is refused.
-    if let Some(encoding) = header(header::CONTENT_ENCODING)
-        .filter(|e| !e.trim().eq_ignore_ascii_case("identity"))
-    {
-        return Err(FetchError::Encoded(encoding.to_owned()));
-    }
-    let etag = header(header::ETAG).map(str::to_owned);
+impl Fetched {
+    /// The artifact read out of a `200`.
+    async fn of(
+        response: hyper::Response<hyper::body::Incoming>,
+    ) -> Result<Fetched, FetchError> {
+        let (parts, body) = response.into_parts();
+        let header = |name: header::HeaderName| {
+            parts.headers.get(name).and_then(|v| v.to_str().ok())
+        };
+        let media = header(header::CONTENT_TYPE).unwrap_or_default();
+        if !is_html(media) {
+            return Err(FetchError::Media(media.to_owned()));
+        }
+        // The request admitted `identity` alone; an encoded body is refused.
+        if let Some(encoding) = header(header::CONTENT_ENCODING)
+            .filter(|e| !e.trim().eq_ignore_ascii_case("identity"))
+        {
+            return Err(FetchError::Encoded(encoding.to_owned()));
+        }
+        let etag = header(header::ETAG).map(str::to_owned);
 
-    // Bounded while it is read, whatever `content-length` declares.
-    let body = Limited::new(body, scan::MAX_ARTIFACT_BYTES)
-        .collect()
-        .await
-        .map_err(
-            |e| match e.downcast_ref::<http_body_util::LengthLimitError>() {
-                Some(_) => FetchError::TooLarge,
-                None => FetchError::unreachable(format!("reading the body: {e}")),
-            },
-        )?;
-    let html =
-        String::from_utf8(Vec::from(body.to_bytes())).map_err(|_| FetchError::NotUtf8)?;
-    Ok(Fetched::Fresh { html, etag })
+        // Bounded while it is read, whatever `content-length` declares.
+        let body = Limited::new(body, scan::MAX_ARTIFACT_BYTES)
+            .collect()
+            .await
+            .map_err(
+                |e| match e.downcast_ref::<http_body_util::LengthLimitError>() {
+                    Some(_) => FetchError::TooLarge,
+                    None => FetchError::unreachable(format!("reading the body: {e}")),
+                },
+            )?;
+        let html = String::from_utf8(Vec::from(body.to_bytes()))
+            .map_err(|_| FetchError::NotUtf8)?;
+        Ok(Fetched::Fresh { html, etag })
+    }
 }
 
 /// What a retrieval reads and writes: TCP, or TLS over it.
@@ -484,7 +487,7 @@ mod tests {
 
     /// A deployment pointed at this test's own Distribution.
     fn config(ccdp_origin: &str) -> crate::config::Config {
-        crate::fixtures::config(&["--ccdp-origin", ccdp_origin])
+        crate::config::Config::fixture(&["--ccdp-origin", ccdp_origin])
     }
 
     fn served(state: &Arc<AppState>) -> String {

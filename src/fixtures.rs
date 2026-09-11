@@ -195,18 +195,20 @@ async fn answer(
     response.body(body).unwrap().into_response()
 }
 
-/// One healthy Distribution, started once and shared by every test that
-/// builds a deployment.
-pub fn distribution() -> &'static Distribution {
-    static SHARED: OnceLock<Distribution> = OnceLock::new();
-    SHARED.get_or_init(|| {
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| runtime().block_on(Distribution::healthy()))
-                .join()
-                .expect("the shared Distribution starts")
+impl Distribution {
+    /// One healthy Distribution, started once and shared by every test that
+    /// builds a deployment.
+    pub fn shared() -> &'static Distribution {
+        static SHARED: OnceLock<Distribution> = OnceLock::new();
+        SHARED.get_or_init(|| {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| runtime().block_on(Distribution::healthy()))
+                    .join()
+                    .expect("the shared Distribution starts")
+            })
         })
-    })
+    }
 }
 
 /// A loopback port nothing listens on, bound once and released: a session a
@@ -226,54 +228,60 @@ pub const CLIENT_ID: &str = "Iv1.0123456789abcdef";
 /// The secret every fixture deployment holds.
 pub const CLIENT_SECRET: &str = "ghs_secret";
 
-/// A configuration that starts, with `args` replacing any default it names.
-///
-/// Every flag that reads an environment variable is listed, so the process
-/// environment reaches nothing. `--platforms` is this fixture's own: the JSON
-/// records go to `Config::platforms`, which the binary fills from the
-/// configuration file. The CCDP origin is the shared Distribution's unless
-/// `args` names another.
-pub fn config(args: &[&str]) -> config::Config {
-    let platforms =
-        format!(r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1]}}]"#);
-    let mut flags: Vec<(&str, &str)> = vec![
-        ("--host", "127.0.0.1"),
-        ("--port", "8722"),
-        ("--notary-wire-port", dead_port()),
-        ("--callback-path", "/auth/callback"),
-        ("--allowed-app-origins", "https://app.example"),
-        ("--ccdp-origin", distribution().origin()),
-        ("--platforms", &platforms),
-        ("--gh-oauth-client-secret", CLIENT_SECRET),
-    ];
-    for pair in args.chunks(2) {
-        let [flag, value] = pair else {
-            panic!("test flags come in pairs, got {pair:?}")
-        };
-        match flags.iter_mut().find(|(f, _)| f == flag) {
-            Some(slot) => slot.1 = value,
-            None => flags.push((flag, value)),
+impl config::Config {
+    /// A configuration that starts, with `args` replacing any default it
+    /// names.
+    ///
+    /// Every flag that reads an environment variable is listed, so the
+    /// process environment reaches nothing. `--platforms` is this fixture's
+    /// own: the JSON records go to `Config::platforms`, which the binary
+    /// fills from the configuration file. The CCDP origin is the shared
+    /// Distribution's unless `args` names another.
+    pub fn fixture(args: &[&str]) -> config::Config {
+        let platforms =
+            format!(r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1]}}]"#);
+        let mut flags: Vec<(&str, &str)> = vec![
+            ("--host", "127.0.0.1"),
+            ("--port", "8722"),
+            ("--notary-wire-port", dead_port()),
+            ("--callback-path", "/auth/callback"),
+            ("--allowed-app-origins", "https://app.example"),
+            ("--ccdp-origin", Distribution::shared().origin()),
+            ("--platforms", &platforms),
+            ("--gh-oauth-client-secret", CLIENT_SECRET),
+        ];
+        for pair in args.chunks(2) {
+            let [flag, value] = pair else {
+                panic!("test flags come in pairs, got {pair:?}")
+            };
+            match flags.iter_mut().find(|(f, _)| f == flag) {
+                Some(slot) => slot.1 = value,
+                None => flags.push((flag, value)),
+            }
         }
+        let platforms = flags
+            .iter()
+            .position(|(f, _)| *f == "--platforms")
+            .map(|i| flags.remove(i).1)
+            .expect("the fixture lists --platforms");
+        let mut argv = vec!["libid-server-rs"];
+        for (flag, value) in &flags {
+            argv.push(flag);
+            argv.push(value);
+        }
+        let mut cfg = <config::Config as clap::Parser>::parse_from(argv);
+        cfg.platforms =
+            serde_json::from_str(platforms).expect("the fixture's platform records");
+        cfg
     }
-    let platforms = flags
-        .iter()
-        .position(|(f, _)| *f == "--platforms")
-        .map(|i| flags.remove(i).1)
-        .expect("the fixture lists --platforms");
-    let mut argv = vec!["libid-server-rs"];
-    for (flag, value) in &flags {
-        argv.push(flag);
-        argv.push(value);
-    }
-    let mut cfg = <config::Config as clap::Parser>::parse_from(argv);
-    cfg.platforms =
-        serde_json::from_str(platforms).expect("the fixture's platform records");
-    cfg
 }
 
-/// A deployment built from [`config`], the way the binary builds one.
-pub async fn deployment(args: &[&str]) -> Arc<AppState> {
-    crate::build_state(&config(args))
-        .await
-        .expect("a deployment the fixtures can serve")
+impl AppState {
+    /// A deployment built from [`config::Config::fixture`], the way the
+    /// binary builds one.
+    pub async fn fixture(args: &[&str]) -> Arc<AppState> {
+        crate::build_state(&config::Config::fixture(args))
+            .await
+            .expect("a deployment the fixtures can serve")
+    }
 }

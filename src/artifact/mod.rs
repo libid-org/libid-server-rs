@@ -20,6 +20,9 @@ use scan::{
     ArtifactError,
     Layout,
 };
+use upstream::Upstream;
+
+use crate::error::Error;
 
 #[cfg(test)]
 pub(crate) use crate::fixtures::ARTIFACT as FIXTURE;
@@ -105,8 +108,39 @@ pub(crate) struct Published {
     /// The document, and the policy it is served under.
     pub(crate) document: CallbackDocument,
     /// The `ETag` the document arrived with, sent back as `If-None-Match`.
-    /// `None` for a configured file, which nothing revalidates.
     pub(crate) etag: Option<String>,
+}
+
+impl Published {
+    /// The artifact retrieved from `upstream` by a request carrying no
+    /// validator, composed for the deployment. A retrieval that fails is an
+    /// error, and the process does not start.
+    pub(crate) async fn retrieved(
+        upstream: &Upstream,
+        allowed_origins: &[String],
+    ) -> Result<Published, Error> {
+        let url = upstream.url();
+        let published = upstream
+            .retrieve(allowed_origins, None)
+            .await
+            .map_err(|e| Error::ArtifactUnavailable {
+                url: url.clone(),
+                detail: format!("{e}"),
+            })?
+            .ok_or_else(|| Error::ArtifactUnavailable {
+                url: url.clone(),
+                detail:
+                    "answered 304 Not Modified to a request carrying no If-None-Match"
+                        .into(),
+            })?;
+        tracing::info!(
+            url,
+            etag = published.etag.as_deref().unwrap_or("<none>"),
+            policy = published.document.csp.to_str().unwrap_or("<unreadable>"),
+            "retrieved the callback artifact"
+        );
+        Ok(published)
+    }
 }
 
 /// The response policy, from the hashes of the scripts this document carries

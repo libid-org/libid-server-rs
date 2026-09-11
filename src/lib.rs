@@ -96,7 +96,8 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         }
     };
 
-    let (upstream, published) = callback_source(&ccdp_origin, &allowed_origins).await?;
+    let upstream = artifact::upstream::Upstream::new(&ccdp_origin)?;
+    let published = artifact::Published::retrieved(&upstream, &allowed_origins).await?;
     let (callback_tx, callback) = tokio::sync::watch::channel(Arc::new(published));
 
     Ok(Arc::new(AppState {
@@ -136,36 +137,6 @@ pub async fn serve(
 /// returns only when the process ends.
 pub async fn refresh_callback(state: Arc<AppState>) {
     artifact::upstream::refresh(state, artifact::upstream::Schedule::DEPLOYED).await
-}
-
-/// The callback document, retrieved from `{ccdpOrigin}/ccdp/callback.html`.
-/// A retrieval that fails is an error, and the process does not start.
-async fn callback_source(
-    ccdp_origin: &str,
-    allowed_origins: &[String],
-) -> Result<(artifact::upstream::Upstream, artifact::Published)> {
-    let upstream = artifact::upstream::Upstream::new(ccdp_origin)?;
-    let url = upstream.url();
-    // The first GET carries no validator.
-    let published = upstream
-        .retrieve(allowed_origins, None)
-        .await
-        .map_err(|e| Error::ArtifactUnavailable {
-            url: url.clone(),
-            detail: format!("{e}"),
-        })?
-        .ok_or_else(|| Error::ArtifactUnavailable {
-            url: url.clone(),
-            detail: "answered 304 Not Modified to a request carrying no If-None-Match"
-                .into(),
-        })?;
-    tracing::info!(
-        url,
-        etag = published.etag.as_deref().unwrap_or("<none>"),
-        policy = published.document.csp.to_str().unwrap_or("<unreadable>"),
-        "retrieved the callback artifact"
-    );
-    Ok((upstream, published))
 }
 
 /// The application origins admitted to read the configuration.
@@ -314,10 +285,8 @@ fn callback_path(path: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        fixtures::{
-            config,
-            distribution,
-        },
+        config::Config,
+        fixtures::Distribution,
         *,
     };
 
@@ -333,10 +302,10 @@ mod tests {
             .expect("the ccdp origin is an argument");
         assert_eq!(arg.get_default_values(), ["https://lib.id"]);
 
-        let state = build_state(&config(&[])).await.unwrap();
+        let state = build_state(&Config::fixture(&[])).await.unwrap();
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
-        assert_eq!(record["ccdpOrigin"], distribution().origin());
+        assert_eq!(record["ccdpOrigin"], Distribution::shared().origin());
     }
 
     /// Plaintext `http` is admitted on exactly `localhost` and `127.0.0.1`,
@@ -362,13 +331,13 @@ mod tests {
     #[tokio::test]
     async fn the_effective_admission_set_is_the_allowlist_plus_the_ccdp_origin() {
         async fn origins(args: &[&str]) -> Vec<String> {
-            build_state(&config(args))
+            build_state(&Config::fixture(args))
                 .await
                 .unwrap()
                 .allowed_origins
                 .to_vec()
         }
-        let ccdp = distribution().origin().to_owned();
+        let ccdp = Distribution::shared().origin().to_owned();
 
         let joined = origins(&[]).await;
         assert_eq!(joined, ["https://app.example".to_owned(), ccdp.clone()]);
@@ -462,7 +431,7 @@ mod tests {
             ),
         ] {
             assert!(
-                build_state(&config(&args)).await.is_err(),
+                build_state(&Config::fixture(&args)).await.is_err(),
                 "{why} must stop the process"
             );
         }
@@ -472,7 +441,7 @@ mod tests {
     /// its client id and versions, and no secret.
     #[tokio::test]
     async fn the_published_configuration_keys_every_enabled_platform_by_name() {
-        let state = build_state(&config(&[
+        let state = build_state(&Config::fixture(&[
             "--platforms",
             r#"[{"id":"google","client_id":"g","versions":[1,2]},{"id":"x","client_id":"xc","versions":[3]},{"id":"github","client_id":"gh","versions":[1]}]"#,
         ])).await
@@ -496,14 +465,14 @@ mod tests {
     #[tokio::test]
     async fn the_github_secret_and_the_github_platform_require_each_other() {
         let no_secret = vec!["--gh-oauth-client-secret", ""];
-        assert!(build_state(&config(&no_secret)).await.is_err());
+        assert!(build_state(&Config::fixture(&no_secret)).await.is_err());
 
         let x_only = vec![
             "--platforms",
             r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
         ];
         assert!(
-            build_state(&config(&x_only)).await.is_err(),
+            build_state(&Config::fixture(&x_only)).await.is_err(),
             "a secret with no github platform must stop the process"
         );
 
@@ -513,7 +482,7 @@ mod tests {
             "--gh-oauth-client-secret",
             "",
         ];
-        let state = build_state(&config(&neither)).await.unwrap();
+        let state = build_state(&Config::fixture(&neither)).await.unwrap();
         assert!(state.github.is_none());
     }
 
@@ -521,10 +490,10 @@ mod tests {
     /// and one without.
     #[tokio::test]
     async fn building_the_router_for_a_configured_deployment_does_not_panic() {
-        let state = build_state(&config(&[])).await.unwrap();
+        let state = build_state(&Config::fixture(&[])).await.unwrap();
         let _: axum::Router = routes::build_router(state);
 
-        let x_only = build_state(&config(&[
+        let x_only = build_state(&Config::fixture(&[
             "--platforms",
             r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
             "--gh-oauth-client-secret",
@@ -543,7 +512,7 @@ mod tests {
             AsyncWriteExt,
         };
 
-        let state = build_state(&config(&[])).await.unwrap();
+        let state = build_state(&Config::fixture(&[])).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
