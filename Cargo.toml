@@ -22,28 +22,10 @@ futures-util = { version = "0.3", optional = true }
 # libid-signer is deliberately absent, and with it the AWS SDK: this service
 # holds no signing key. Nothing else here needs it — the notary digest is
 # only ever verified, never signed.
-# Pinned to a REVISION, not a tag, and deliberately: the ceremony
-# constructions this service needs are not in any release yet. Move to the tag
-# the day libid-rs cuts one containing `libid-ceremony`.
-#
-# This is libid-rs `main`, at the merge of #2. It is what makes the ceremony
-# complete: before it, the verifier read a finished mux driver as a dead
-# connection at every stage, so the prover's own `handle.close()` aborted every
-# successful session before the attestation was signed. `8954d84` is that fix,
-# and `origin_form` beside it is the request-target one -- hyper writes an
-# absolute-form request line, which is reserved for a proxy, and the Platform
-# Verifier compares the revealed path against a profile constant.
-#
-# TLSNotary also gates a session on a protocol version, so a prover built
-# against alpha.15 cannot talk to a verifier built against alpha.16-pre at all
-# -- it fails at "Setting up MPC-TLS" with `prover version does not match with
-# verifier`, before any ceremony logic runs. libid-rs pins upstream tlsn at the
-# alpha.15 tag; the `[patch]` block at the end of this file redirects it onto
-# the fork the NOTARY runs, and that is what makes the two speak. When the
-# notary moves, that block moves with it -- this pin does not.
-libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0" }
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0" }
-libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0" }
+# Released whitespace-aware transcripts; patches below retain the RC3 notary runtime.
+libid-ceremony = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 # Upstream TLSNotary is NOT a direct dependency. Everything this service reads
 # off a session — `CommitmentOpening` and the `Direction` it carries — comes
 # re-exported from libid-tlsn. What libid-tlsn pins is then overridden by the
@@ -119,34 +101,35 @@ rcgen = "0.13"
 # WIP: TLSNotary #1178 reclaims the channel, #1179 preserves hash-opening
 # order, and #1173 fixes RCOT preprocessing deadlocks. Return to a release
 # containing all three fixes when available.
-tlsn = { git = "https://github.com/libid-org/tlsn", rev = "8a5de746f73bbe3476a3b10ce411fde3c87e479d" }
+tlsn = { git = "https://github.com/libid-org/tlsn", rev = "94aaaf33f3361d1218f9abb4c82b5c58a9199460" }
 
 # TLSNotary #1173 also needs privacy-ethereum/mpz#446 KOS instance-domain
-# separation. Cargo ignores dependency-workspace patches, so repeat TLSN's
+# separation and libid-org/mpz#2 keeps active context tasks alive.
+# Cargo ignores dependency-workspace patches, so repeat TLSN's
 # matching alpha.6-compatible pin here for the server and test clients.
 [patch."https://github.com/privacy-ethereum/mpz"]
-clmul = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-matrix-transpose = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-circuits = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-circuits-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-circuits-data = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-cointoss = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-cointoss-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-common = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-fields = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-garble = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-garble-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-hash = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-ideal-vm = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-memory-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-ole = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-ole-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-ot = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-ot-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-share-conversion = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-share-conversion-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-vm-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-zk = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
-mpz-zk-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+clmul = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+matrix-transpose = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-circuits = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-circuits-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-circuits-data = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-cointoss = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-cointoss-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-common = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-fields = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-garble = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-garble-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-hash = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-ideal-vm = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-memory-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-ole = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-ole-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-ot = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-ot-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-share-conversion = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-share-conversion-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-vm-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-zk = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
+mpz-zk-core = { git = "https://github.com/libid-org/mpz", rev = "1dd2349d52aeea038d77fb0816f781c6b714fe77" }
 

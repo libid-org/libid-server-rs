@@ -575,7 +575,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 [[package]]
 name = "clmul"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -1600,8 +1600,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libid-ceremony"
-version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=501f094bf10f776c2227ef345908f507a0c80fd0#501f094bf10f776c2227ef345908f507a0c80fd0"
+version = "0.4.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
 dependencies = [
  "bincode 2.0.1",
  "libid-crypto",
@@ -1610,8 +1610,8 @@ dependencies = [
 
 [[package]]
 name = "libid-crypto"
-version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=501f094bf10f776c2227ef345908f507a0c80fd0#501f094bf10f776c2227ef345908f507a0c80fd0"
+version = "0.4.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
 dependencies = [
  "hex",
  "k256",
@@ -1622,9 +1622,9 @@ dependencies = [
 
 [[package]]
 name = "libid-profiles"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dab7ecd48e0d3c233192f235e4cc6f90dc6b62fe6ffb9903d99120e6f70c895"
+checksum = "b500f5875925c4bce39377730a0ffc8f66dd4d623fc7c1555411b48b2076530e"
 
 [[package]]
 name = "libid-server-rs"
@@ -1660,8 +1660,8 @@ dependencies = [
 
 [[package]]
 name = "libid-tlsn"
-version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=501f094bf10f776c2227ef345908f507a0c80fd0#501f094bf10f776c2227ef345908f507a0c80fd0"
+version = "0.4.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -1678,8 +1678,8 @@ dependencies = [
 
 [[package]]
 name = "libid-transcript"
-version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=501f094bf10f776c2227ef345908f507a0c80fd0#501f094bf10f776c2227ef345908f507a0c80fd0"
+version = "0.4.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
 dependencies = [
  "httparse",
  "libid-profiles",
@@ -1728,7 +1728,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "matrix-transpose"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "thiserror 1.0.69",
 ]
@@ -1759,7 +1759,7 @@ dependencies = [
 [[package]]
 name = "mpz-circuits"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "mpz-circuits-core",
  "mpz-circuits-data",
@@ -1768,7 +1768,7 @@ dependencies = [
 [[package]]
 name = "mpz-circuits-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "bincode 1.3.3",
  "itybity 0.3.3",
@@ -1783,7 +1783,7 @@ dependencies = [
 [[package]]
 name = "mpz-circuits-data"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "bincode 1.3.3",
  "mpz-circuits-core",
@@ -1793,7 +1793,7 @@ dependencies = [
 [[package]]
 name = "mpz-cointoss"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "futures",
  "mpz-cointoss-core",
@@ -1806,7 +1806,7 @@ dependencies = [
 [[package]]
 name = "mpz-cointoss-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "mpz-core",
  "opaque-debug",
@@ -1817,7 +1817,7 @@ dependencies = [
 [[package]]
 name = "mpz-common"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "async-task",
  "async-trait",
@@ -1839,7 +1839,7 @@ dependencies = [
 [[package]]
 name = "mpz-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "aes 0.9.3",
  "bcs",
@@ -1865,7 +1865,7 @@ dependencies = [
 [[package]]
 name = "mpz-fields"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "ark-ff",
  "ark-secp256r1",
@@ -1886,7 +1886,7 @@ dependencies = [
 [[package]]
 name = "mpz-garble"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
@@ -1912,7 +1912,7 @@ dependencies = [
 [[package]]
 name = "mpz-garble-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "aes 0.9.3",
  "bitvec",
@@ -1943,7 +1943,7 @@ dependencies = [
 [[package]]
 name = "mpz-hash"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "blake3",
  "itybity 0.3.3",
@@ -1956,7 +1956,7 @@ dependencies = [
 [[package]]
 name = "mpz-ideal-vm"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "async-trait",
  "futures",
@@ -1973,7 +1973,7 @@ dependencies = [
 [[package]]
 name = "mpz-memory-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "blake3",
  "futures",
@@ -1988,7 +1988,7 @@ dependencies = [
 [[package]]
 name = "mpz-ole"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "async-trait",
  "futures",
@@ -2006,7 +2006,7 @@ dependencies = [
 [[package]]
 name = "mpz-ole-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "hybrid-array",
  "itybity 0.3.3",
@@ -2022,7 +2022,7 @@ dependencies = [
 [[package]]
 name = "mpz-ot"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -2045,7 +2045,7 @@ dependencies = [
 [[package]]
 name = "mpz-ot-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "aes 0.9.3",
  "blake3",
@@ -2076,7 +2076,7 @@ dependencies = [
 [[package]]
 name = "mpz-share-conversion"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "async-trait",
  "mpz-common",
@@ -2092,7 +2092,7 @@ dependencies = [
 [[package]]
 name = "mpz-share-conversion-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "mpz-common",
  "mpz-core",
@@ -2106,7 +2106,7 @@ dependencies = [
 [[package]]
 name = "mpz-vm-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "async-trait",
  "futures",
@@ -2119,7 +2119,7 @@ dependencies = [
 [[package]]
 name = "mpz-zk"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2137,7 +2137,7 @@ dependencies = [
 [[package]]
 name = "mpz-zk-core"
 version = "0.1.0-alpha.6"
-source = "git+https://github.com/libid-org/mpz?rev=c0379ef#c0379efa81cad70c21c922f65a6094da6f10c630"
+source = "git+https://github.com/libid-org/mpz?rev=1dd2349d52aeea038d77fb0816f781c6b714fe77#1dd2349d52aeea038d77fb0816f781c6b714fe77"
 dependencies = [
  "blake3",
  "cfg-if",
@@ -3103,7 +3103,7 @@ dependencies = [
 [[package]]
 name = "tlsn"
 version = "0.1.0-alpha.16-pre"
-source = "git+https://github.com/libid-org/tlsn?rev=8a5de746f73bbe3476a3b10ce411fde3c87e479d#8a5de746f73bbe3476a3b10ce411fde3c87e479d"
+source = "git+https://github.com/libid-org/tlsn?rev=94aaaf33f3361d1218f9abb4c82b5c58a9199460#94aaaf33f3361d1218f9abb4c82b5c58a9199460"
 dependencies = [
  "aes 0.8.4",
  "ctr 0.9.2",
@@ -3151,7 +3151,7 @@ dependencies = [
 [[package]]
 name = "tlsn-attestation"
 version = "0.1.0-alpha.16-pre"
-source = "git+https://github.com/libid-org/tlsn?rev=8a5de746f73bbe3476a3b10ce411fde3c87e479d#8a5de746f73bbe3476a3b10ce411fde3c87e479d"
+source = "git+https://github.com/libid-org/tlsn?rev=94aaaf33f3361d1218f9abb4c82b5c58a9199460#94aaaf33f3361d1218f9abb4c82b5c58a9199460"
 dependencies = [
  "bcs",
  "blake3",
@@ -3169,7 +3169,7 @@ dependencies = [
 [[package]]
 name = "tlsn-cipher"
 version = "0.1.0-alpha.16-pre"
-source = "git+https://github.com/libid-org/tlsn?rev=8a5de746f73bbe3476a3b10ce411fde3c87e479d#8a5de746f73bbe3476a3b10ce411fde3c87e479d"
+source = "git+https://github.com/libid-org/tlsn?rev=94aaaf33f3361d1218f9abb4c82b5c58a9199460#94aaaf33f3361d1218f9abb4c82b5c58a9199460"
 dependencies = [
  "aes 0.8.4",
  "async-trait",
@@ -3182,7 +3182,7 @@ dependencies = [
 [[package]]
 name = "tlsn-core"
 version = "0.1.0-alpha.16-pre"
-source = "git+https://github.com/libid-org/tlsn?rev=8a5de746f73bbe3476a3b10ce411fde3c87e479d#8a5de746f73bbe3476a3b10ce411fde3c87e479d"
+source = "git+https://github.com/libid-org/tlsn?rev=94aaaf33f3361d1218f9abb4c82b5c58a9199460#94aaaf33f3361d1218f9abb4c82b5c58a9199460"
 dependencies = [
  "bimap",
  "blake3",
@@ -3211,7 +3211,7 @@ dependencies = [
 [[package]]
 name = "tlsn-deap"
 version = "0.1.0-alpha.16-pre"
-source = "git+https://github.com/libid-org/tlsn?rev=8a5de746f73bbe3476a3b10ce411fde3c87e479d#8a5de746f73bbe3476a3b10ce411fde3c87e479d"
+source = "git+https://github.com/libid-org/tlsn?rev=94aaaf33f3361d1218f9abb4c82b5c58a9199460#94aaaf33f3361d1218f9abb4c82b5c58a9199460"
 dependencies = [
  "async-trait",
  "futures",
@@ -3228,7 +3228,7 @@ dependencies = [
 [[package]]
 name = "tlsn-hmac-sha256"
 version = "0.1.0-alpha.16-pre"
-source = "git+https://github.com/libid-org/tlsn?rev=8a5de746f73bbe3476a3b10ce411fde3c87e479d#8a5de746f73bbe3476a3b10ce411fde3c87e479d"
+source = "git+https://github.com/libid-org/tlsn?rev=94aaaf33f3361d1218f9abb4c82b5c58a9199460#94aaaf33f3361d1218f9abb4c82b5c58a9199460"
 dependencies = [
  "mpz-circuits",
  "mpz-core",
@@ -3242,7 +3242,7 @@ dependencies = [
 [[package]]
 name = "tlsn-key-exchange"
 version = "0.1.0-alpha.16-pre"
-source = "git+https://github.com/libid-org/tlsn?rev=8a5de746f73bbe3476a3b10ce411fde3c87e479d#8a5de746f73bbe3476a3b10ce411fde3c87e479d"
+source = "git+https://github.com/libid-org/tlsn?rev=94aaaf33f3361d1218f9abb4c82b5c58a9199460#94aaaf33f3361d1218f9abb4c82b5c58a9199460"
 dependencies = [
  "async-trait",
  "derive_builder 0.12.0",
@@ -3265,7 +3265,7 @@ dependencies = [
 [[package]]
 name = "tlsn-mpc-tls"
 version = "0.1.0-alpha.16-pre"
-source = "git+https://github.com/libid-org/tlsn?rev=8a5de746f73bbe3476a3b10ce411fde3c87e479d#8a5de746f73bbe3476a3b10ce411fde3c87e479d"
+source = "git+https://github.com/libid-org/tlsn?rev=94aaaf33f3361d1218f9abb4c82b5c58a9199460#94aaaf33f3361d1218f9abb4c82b5c58a9199460"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -3315,7 +3315,7 @@ dependencies = [
 [[package]]
 name = "tlsn-tls-core"
 version = "0.1.0-alpha.16-pre"
-source = "git+https://github.com/libid-org/tlsn?rev=8a5de746f73bbe3476a3b10ce411fde3c87e479d#8a5de746f73bbe3476a3b10ce411fde3c87e479d"
+source = "git+https://github.com/libid-org/tlsn?rev=94aaaf33f3361d1218f9abb4c82b5c58a9199460#94aaaf33f3361d1218f9abb4c82b5c58a9199460"
 dependencies = [
  "futures",
  "hmac",
