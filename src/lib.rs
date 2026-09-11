@@ -105,6 +105,19 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     }))
 }
 
+/// Serve `state` on `listener` until `shutdown` resolves; in-flight requests
+/// finish first.
+pub async fn serve(
+    state: Arc<AppState>,
+    listener: tokio::net::TcpListener,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let app = routes::build_router(state);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+}
+
 impl artifact::CallbackDocument {
     /// The document this deployment serves: the artifact
     /// `CALLBACK_ARTIFACT_PATH` names, or the compiled-in floor when it is
@@ -643,5 +656,40 @@ mod tests {
         ]))
         .unwrap();
         let _: axum::Router = routes::build_router(x_only);
+    }
+
+    /// The bound listener answers until told to stop, and `serve` returns.
+    #[tokio::test]
+    async fn serve_answers_until_told_to_stop() {
+        use tokio::io::{
+            AsyncReadExt,
+            AsyncWriteExt,
+        };
+
+        let state = build_state(&config(&[])).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve(state, listener, async {
+            let _ = stopped.await;
+        }));
+
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket
+            .write_all(
+                b"GET /health HTTP/1.1\r\nhost: bridge\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut answer = Vec::new();
+        socket.read_to_end(&mut answer).await.unwrap();
+        assert!(
+            answer.starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
+
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
     }
 }
