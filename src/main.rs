@@ -18,7 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cfg = Config::resolve()?;
-    let state = build_state(&cfg)?;
+    // The artifact is retrieved before the listener binds; a failure exits
+    // non-zero.
+    let state = build_state(&cfg).await?;
 
     let listener =
         tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;

@@ -7,7 +7,10 @@
 
 use std::sync::Arc;
 
-use tokio::sync::Semaphore;
+use tokio::sync::{
+    watch,
+    Semaphore,
+};
 
 use crate::oauth::OAuthCredentials;
 
@@ -41,9 +44,15 @@ pub struct AppState {
     /// The path the providers redirect back to, where the callback document
     /// answers.
     pub(crate) callback_path: String,
-    /// The callback document and the policy it is served under, composed once
-    /// at startup.
-    pub(crate) callback: crate::artifact::CallbackDocument,
+    /// The callback document, the policy it is served under, and the validator
+    /// it was retrieved with. Never empty: startup retrieves an artifact or the
+    /// process does not start. A refresh replaces the whole value at once.
+    pub(crate) callback: watch::Receiver<Arc<crate::artifact::Published>>,
+    /// The publishing end, for the refresh task.
+    pub(crate) callback_tx: watch::Sender<Arc<crate::artifact::Published>>,
+    /// The Distribution the artifact was retrieved from, and is revalidated
+    /// against on the refresh schedule.
+    pub(crate) upstream: crate::artifact::upstream::Upstream,
     /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: read by
     /// the configuration route and inserted into the callback document. Exact
     /// canonical strings, compared against what a browser sends.

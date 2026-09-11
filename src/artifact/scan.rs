@@ -369,9 +369,9 @@ mod tests {
     }
 
     #[test]
-    fn the_compiled_in_artifact_is_readable() {
-        let layout = Layout::scan(super::super::EMBEDDED).expect("the floor must scan");
-        assert_eq!(super::super::EMBEDDED[layout.slot].trim(), MARKER);
+    fn the_fixture_is_readable() {
+        let layout = Layout::scan(super::super::FIXTURE).expect("the fixture must scan");
+        assert_eq!(super::super::FIXTURE[layout.slot].trim(), MARKER);
         assert_eq!(layout.executables.len(), 1);
     }
 

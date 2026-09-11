@@ -30,10 +30,6 @@ allowed_app_origins = ["https://app.example", "https://wallet.example"]
 # Distribution.
 ccdp_origin = "https://lib.id"
 
-# A callback.html obtained from the CCDP Distribution, served instead of the
-# compiled-in one.
-# callback_artifact_path = "/etc/libid/callback.html"
-
 # The GitHub OAuth App client secret, required when a platform below is
 # "github". A file that sets it stays out of version control; the
 # GH_OAUTH_CLIENT_SECRET environment variable overrides it.

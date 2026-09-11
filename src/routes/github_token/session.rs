@@ -221,6 +221,11 @@ mod tests {
         }
     }
 
+    /// The opening of exactly the bearer's range.
+    fn bearer_opening() -> CommitmentOpening {
+        opening(Direction::Received, bearer_range(), 0x03)
+    }
+
     /// A selection that kept the bearer of [`RECV`].
     fn selected() -> Kept {
         let mut kept = Kept::new();
@@ -229,11 +234,51 @@ mod tests {
         kept
     }
 
-    /// A record as the notary writes it, on a socket the assembly reads.
+    /// A record as the notary writes it.
     fn record() -> AttestationWire {
         AttestationWire {
             attested_data: vec![0xAB; 96],
             notary_signature: vec![0xCD; 65],
+        }
+    }
+
+    /// What the notary does on the socket after the session.
+    enum Notary {
+        WritesTheRecord,
+        ClosesWithoutOne,
+        StaysSilent,
+    }
+
+    /// The assembly, over a socket the notary behaves as `notary` on.
+    async fn assembled(
+        kept: Kept,
+        openings: &[CommitmentOpening],
+        notary: Notary,
+    ) -> Result<TokenResponse, Error> {
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        let held = match notary {
+            Notary::WritesTheRecord => {
+                libid_transcript::write_msg(&mut writer, &record())
+                    .await
+                    .unwrap();
+                Some(writer)
+            }
+            Notary::ClosesWithoutOne => {
+                drop(writer);
+                None
+            }
+            Notary::StaysSilent => Some(writer),
+        };
+        let result = assemble(kept, openings, &mut reader).await;
+        drop(held);
+        result
+    }
+
+    /// The detail of a session failure.
+    fn detail(failed: Error) -> String {
+        match failed {
+            Error::MpcTlsFailed { detail } => detail,
+            other => panic!("{other}"),
         }
     }
 
@@ -280,8 +325,7 @@ mod tests {
                 "{failed}"
             );
             assert!(kept.selected.is_none());
-            let answered = kept.refusal(driver_error());
-            let variant = match answered {
+            let variant = match kept.refusal(driver_error()) {
                 Error::OAuthFailed { .. } => "OAuthFailed",
                 Error::PlatformMisconfigured { .. } => "PlatformMisconfigured",
                 Error::MpcTlsFailed { .. } => "MpcTlsFailed",
@@ -302,20 +346,19 @@ mod tests {
         assert!(matches!(answered, Error::Tlsn(_)), "{answered}");
     }
 
-    /// The bearer, its opening and the notary's record, assembled.
+    /// The bearer, its opening and the notary's record, assembled; the other
+    /// openings are passed over.
     #[tokio::test]
     async fn the_response_is_the_bearer_its_opening_and_the_record() {
-        let (mut notary, mut bridge) = tokio::io::duplex(4096);
-        libid_transcript::write_msg(&mut notary, &record())
-            .await
-            .unwrap();
         let openings = [
             opening(Direction::Sent, 10..20, 0x01),
             opening(Direction::Received, 0..bearer_range().start, 0x02),
-            opening(Direction::Received, bearer_range(), 0x03),
+            bearer_opening(),
         ];
 
-        let response = assemble(selected(), &openings, &mut bridge).await.unwrap();
+        let response = assembled(selected(), &openings, Notary::WritesTheRecord)
+            .await
+            .unwrap();
 
         assert_eq!(response.access_token.as_bytes(), BEARER);
         assert_eq!(response.bearer_opening, vec![0x03; 16]);
@@ -332,78 +375,51 @@ mod tests {
     /// A notary that closes the socket without writing a record.
     #[tokio::test]
     async fn a_notary_that_writes_no_record_fails_the_exchange() {
-        let (notary, mut bridge) = tokio::io::duplex(64);
-        drop(notary);
-        let openings = [opening(Direction::Received, bearer_range(), 0x03)];
-
-        let failed = assemble(selected(), &openings, &mut bridge)
+        let failed = assembled(selected(), &[bearer_opening()], Notary::ClosesWithoutOne)
             .await
             .unwrap_err();
-        assert!(
-            matches!(&failed, Error::MpcTlsFailed { detail } if detail.contains("sent no record")),
-            "{failed}"
-        );
+        assert!(detail(failed).contains("for the session it ran"));
     }
 
     /// A notary that keeps the socket open and writes nothing, past the
     /// record budget.
     #[tokio::test(start_paused = true)]
     async fn a_notary_that_never_writes_the_record_is_not_waited_for() {
-        let (_notary, mut bridge) = tokio::io::duplex(64);
-        let openings = [opening(Direction::Received, bearer_range(), 0x03)];
-
-        let failed = assemble(selected(), &openings, &mut bridge)
+        let failed = assembled(selected(), &[bearer_opening()], Notary::StaysSilent)
             .await
             .unwrap_err();
-        assert!(
-            matches!(&failed, Error::MpcTlsFailed { detail } if detail.contains("in time")),
-            "{failed}"
-        );
+        assert!(detail(failed).contains("in time"));
     }
 
     /// The session committed the bearer as part of a wider run, so no opening
-    /// covers exactly it. Nothing is read: the socket is never touched.
+    /// covers exactly it.
     #[tokio::test]
     async fn an_opening_that_does_not_cover_the_bearer_fails_the_exchange() {
-        let (_notary, mut bridge) = tokio::io::duplex(64);
-        let openings = [opening(Direction::Received, 0..RECV.len(), 0x03)];
-
-        let failed = assemble(selected(), &openings, &mut bridge)
+        let wider = [opening(Direction::Received, 0..RECV.len(), 0x03)];
+        let failed = assembled(selected(), &wider, Notary::WritesTheRecord)
             .await
             .unwrap_err();
-        assert!(
-            matches!(&failed, Error::MpcTlsFailed { detail } if detail.contains("exactly once")),
-            "{failed}"
-        );
+        assert!(detail(failed).contains("exactly once"));
     }
 
     /// A session that ran to completion without ever selecting a layout.
     #[tokio::test]
     async fn a_session_that_produced_no_layout_fails_the_exchange() {
-        let (_notary, mut bridge) = tokio::io::duplex(64);
-        let failed = assemble(Kept::new(), &[], &mut bridge).await.unwrap_err();
-        assert!(
-            matches!(&failed, Error::MpcTlsFailed { detail } if detail.contains("no layout")),
-            "{failed}"
-        );
+        let failed = assembled(Kept::new(), &[], Notary::WritesTheRecord)
+            .await
+            .unwrap_err();
+        assert!(detail(failed).contains("no layout"));
     }
 
     /// Committed bearer bytes that are not text are refused, not lossily
     /// decoded.
     #[tokio::test]
     async fn a_bearer_that_is_not_text_fails_the_exchange() {
-        let (mut notary, mut bridge) = tokio::io::duplex(4096);
-        libid_transcript::write_msg(&mut notary, &record())
-            .await
-            .unwrap();
         let mut kept = selected();
         kept.selected = Some((bearer_range(), vec![0xFF, 0xFE]));
-        let openings = [opening(Direction::Received, bearer_range(), 0x03)];
-
-        let failed = assemble(kept, &openings, &mut bridge).await.unwrap_err();
-        assert!(
-            matches!(&failed, Error::MpcTlsFailed { detail } if detail.contains("UTF-8")),
-            "{failed}"
-        );
+        let failed = assembled(kept, &[bearer_opening()], Notary::WritesTheRecord)
+            .await
+            .unwrap_err();
+        assert!(detail(failed).contains("UTF-8"));
     }
 }

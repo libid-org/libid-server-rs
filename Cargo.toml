@@ -10,6 +10,8 @@ description = "libID OAuth Bridge: publishes the ceremony configuration, serves 
 publish = false
 
 [dependencies]
+# A fixture Distribution answering with a chunked body.
+futures-util = { version = "0.3", optional = true }
 # ── libid-rs shared crates ──────────────────────────────────────────────
 # Three crates, one source, one revision. Two of them are also on crates.io,
 # but libid-tlsn is git-only (its upstream `tlsn` dep is not on crates.io) and
@@ -58,12 +60,26 @@ tower-http = { version = "0.6", features = ["cors"] }
 base64 = "0.22"
 # The callback shell hashes its own bootstrap into its CSP at startup.
 sha2 = "0.10"
-# The notarized request is built as a `hyper::Request`, which is what
-# `prover_generic` takes: the session drives the exchange itself rather than
-# handing it to an HTTP client.
+# `prover_generic` takes a `hyper::Request`; the artifact retrieval is a
+# `client`/`http1` connection of this crate's own.
 bytes = "1"
 http-body-util = "0.1"
-hyper = "1"
+hyper = { version = "1", features = ["client", "http1"] }
+# `TokioIo`: a tokio socket as hyper's transport.
+hyper-util = { version = "0.1", features = ["tokio"] }
+
+# ── artifact retrieval over TLS ─────────────────────────────────────────
+# The artifact retrieval's TLS. `ring` is the one crypto provider in the
+# graph (`cargo tree -i aws-lc-rs` is empty), so `ClientConfig::builder()`
+# has exactly one to pick; rustls is reached as `tokio_rustls::rustls`.
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
+# The trust anchors of the artifact retrieval: the crate libid-tlsn builds
+# its own root store from.
+webpki-root-certs = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -82,10 +98,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
+[features]
+# The test fixtures (`libid_server_rs::fixtures`), for the integration tests.
+fixtures = ["dep:futures-util"]
+
 [dev-dependencies]
+libid-server-rs = { path = ".", features = ["fixtures"] }
 tower = { version = "0.5", features = ["util"] }
 # Paused time, for the tests that wait out a budget.
 tokio = { version = "1", features = ["test-util"] }
+# A self-signed certificate for a fixture Distribution that speaks TLS.
+rcgen = "0.13"
 
 # ── TLSNotary fork ──────────────────────────────────────────────────────
 # Copied VERBATIM from the notary's Cargo.toml, and it has to stay that way:
@@ -126,3 +149,4 @@ mpz-share-conversion-core = { git = "https://github.com/libid-org/mpz", rev = "c
 mpz-vm-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
 mpz-zk = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
 mpz-zk-core = { git = "https://github.com/libid-org/mpz", rev = "c0379ef" }
+

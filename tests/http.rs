@@ -10,80 +10,39 @@ use axum::{
         StatusCode,
     },
 };
-use clap::Parser;
 use http_body_util::BodyExt;
 use libid_server_rs::{
-    build_state,
-    config::Config,
+    fixtures::{
+        self,
+        Distribution,
+    },
     routes,
     state::AppState,
 };
 use tower::ServiceExt;
 
-const APP_ORIGIN: &str = "http://localhost:3000";
-const CCDP_ORIGIN: &str = "https://ccdp.example";
+const APP_ORIGIN: &str = "https://app.example";
 
-/// A loopback port nothing listens on, bound once and released: a session a
-/// test does start fails at the dial instead of reaching a notary on this
-/// machine.
-fn dead_port() -> &'static str {
-    static PORT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PORT.get_or_init(|| {
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        free.local_addr().unwrap().port().to_string()
-    })
+/// The shared Distribution's origin: the deployment's CCDP origin, and so the
+/// one origin the token route admits and the callback document names.
+fn ccdp_origin() -> &'static str {
+    Distribution::shared().origin()
 }
 
-/// A deployment, built the way the binary builds one, through `build_state`.
-fn deployment(overrides: &[&str]) -> Arc<AppState> {
-    // Every flag that reads an environment variable is listed, so the process
-    // environment reaches nothing. `--platforms` is this fixture's own: the
-    // JSON records go to `Config::platforms`, which the binary fills from the
-    // configuration file.
-    let mut flags: Vec<(&str, &str)> = vec![
-        ("--host", "127.0.0.1"),
-        ("--port", "8722"),
-        ("--callback-path", "/auth/callback"),
-        (
-            "--allowed-app-origins",
-            "http://localhost:3000,https://wallet.example",
-        ),
-        ("--ccdp-origin", CCDP_ORIGIN),
-        ("--notary-wire-port", dead_port()),
-        (
-            "--platforms",
-            r#"[{"id":"github","client_id":"test-client-id","versions":[1]}]"#,
-        ),
-        ("--gh-oauth-client-secret", "test-client-secret"),
+/// A deployment admitting two applications, with `overrides` replacing any
+/// flag they name.
+async fn deployment(overrides: &[&str]) -> Arc<AppState> {
+    let mut args = vec![
+        "--allowed-app-origins",
+        "https://app.example,https://wallet.example",
     ];
-    for pair in overrides.chunks(2) {
-        let [flag, value] = pair else {
-            panic!("test flags come in pairs, got {pair:?}")
-        };
-        match flags.iter_mut().find(|(f, _)| f == flag) {
-            Some(slot) => slot.1 = value,
-            None => flags.push((flag, value)),
-        }
-    }
-    let platforms = flags
-        .iter()
-        .position(|(f, _)| *f == "--platforms")
-        .map(|i| flags.remove(i).1)
-        .expect("the fixture lists --platforms");
-    let mut argv = vec!["libid-server-rs"];
-    for (flag, value) in &flags {
-        argv.push(flag);
-        argv.push(value);
-    }
-    let mut cfg = Config::parse_from(argv);
-    cfg.platforms =
-        serde_json::from_str(platforms).expect("the fixture's platform records");
-    build_state(&cfg).expect("a deployment this suite can serve")
+    args.extend_from_slice(overrides);
+    AppState::fixture(&args).await
 }
 
 /// The default deployment: GitHub enabled, the full exchange ceiling free.
-fn test_state() -> Arc<AppState> {
-    deployment(&[])
+async fn test_state() -> Arc<AppState> {
+    deployment(&[]).await
 }
 
 fn app(state: Arc<AppState>) -> axum::Router {
@@ -92,7 +51,7 @@ fn app(state: Arc<AppState>) -> axum::Router {
 
 #[tokio::test]
 async fn health_answers_ok_and_carries_nosniff_like_every_other_route() {
-    let resp = app(test_state())
+    let resp = app(test_state().await)
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -109,17 +68,29 @@ async fn health_answers_ok_and_carries_nosniff_like_every_other_route() {
 //
 // Every case here is refused before a notary session is opened.
 
-const ORIGIN: &str = CCDP_ORIGIN;
 const VERIFIER: &str = "iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I";
 
-async fn post_token(origin: Option<&str>, body: String) -> axum::response::Response {
-    let mut req = Request::post("/api/v1/ceremony/github-token")
-        .header("content-type", "application/json");
-    if let Some(origin) = origin {
-        req = req.header("origin", origin);
+const TOKEN: &str = "/api/v1/ceremony/github-token";
+
+/// A `POST` to `path` carrying `body` as `media`, with one `Origin` header per
+/// member of `origins`.
+fn token_request(
+    path: &str,
+    media: &str,
+    origins: &[&str],
+    body: String,
+) -> Request<Body> {
+    let mut req = Request::post(path).header("content-type", media);
+    for origin in origins {
+        req = req.header("origin", *origin);
     }
-    app(test_state())
-        .oneshot(req.body(Body::from(body)).unwrap())
+    req.body(Body::from(body)).unwrap()
+}
+
+/// `POST` the token route of the default deployment.
+async fn post_token(origins: &[&str], body: String) -> axum::response::Response {
+    app(test_state().await)
+        .oneshot(token_request(TOKEN, "application/json", origins, body))
         .await
         .unwrap()
 }
@@ -132,11 +103,41 @@ const NOTARY: &str = "https://127.0.0.1:7048";
 /// under a canonical origin.
 const REDIRECT: &str = "https://bridge.example/auth/callback";
 
-/// A request body carrying every field, varying only the two under test.
-fn token_body(code: &str, verifier: &str) -> String {
-    format!(
-        r#"{{"code":"{code}","codeVerifier":"{verifier}","redirectUri":"{REDIRECT}","notaryAddress":"{NOTARY}"}}"#
+/// A request body carrying every field the route takes, with `overrides`
+/// replacing or adding members.
+fn token_body_with(overrides: &[(&str, &str)]) -> String {
+    let mut fields: Vec<(&str, &str)> = vec![
+        ("code", CODE),
+        ("codeVerifier", VERIFIER),
+        ("redirectUri", REDIRECT),
+        ("notaryAddress", NOTARY),
+    ];
+    for (name, value) in overrides {
+        match fields.iter_mut().find(|(f, _)| f == name) {
+            Some(slot) => slot.1 = value,
+            None => fields.push((name, value)),
+        }
+    }
+    serde_json::Value::Object(
+        fields
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), serde_json::Value::from(value)))
+            .collect(),
     )
+    .to_string()
+}
+
+/// The same body with `field` left out.
+fn token_body_without(field: &str) -> String {
+    let mut body: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&token_body_with(&[])).unwrap();
+    body.remove(field).expect("a field the body carries");
+    serde_json::Value::Object(body).to_string()
+}
+
+/// A request body varying only the two fields under test.
+fn token_body(code: &str, verifier: &str) -> String {
+    token_body_with(&[("code", code), ("codeVerifier", verifier)])
 }
 
 /// A code of the shape GitHub issues, for the cases where the code is not what
@@ -149,7 +150,7 @@ fn valid_body() -> String {
 
 #[tokio::test]
 async fn github_token_refuses_a_foreign_origin() {
-    let resp = post_token(Some("https://evil.example"), valid_body()).await;
+    let resp = post_token(&["https://evil.example"], valid_body()).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(
         resp.headers().get("cache-control").unwrap(),
@@ -160,17 +161,15 @@ async fn github_token_refuses_a_foreign_origin() {
 
 #[tokio::test]
 async fn github_token_refuses_a_request_with_no_origin() {
-    let resp = post_token(None, valid_body()).await;
+    let resp = post_token(&[], valid_body()).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 /// A body carrying a `clientId` or an endpoint is refused rather than ignored.
 #[tokio::test]
 async fn github_token_refuses_a_body_that_tries_to_steer_the_exchange() {
-    let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{NOTARY}","clientId":"Iv1.other"}}"#
-    );
-    let resp = post_token(Some(ORIGIN), body).await;
+    let body = token_body_with(&[("clientId", "Iv1.other")]);
+    let resp = post_token(&[ccdp_origin()], body).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -187,29 +186,26 @@ async fn github_token_refuses_a_redirect_uri_that_is_not_the_registered_callback
         "/auth/callback",
         "",
     ] {
-        let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{bad}","notaryAddress":"{NOTARY}"}}"#
-        );
-        let resp = post_token(Some(ORIGIN), body).await;
+        let body = token_body_with(&[("redirectUri", bad)]);
+        let resp = post_token(&[ccdp_origin()], body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad:?}");
     }
-    let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{NOTARY}"}}"#
-    );
-    let resp = post_token(Some(ORIGIN), body).await;
+    let resp = post_token(&[ccdp_origin()], token_body_without("redirectUri")).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "missing");
 }
 
 #[tokio::test]
 async fn github_token_refuses_a_malformed_body() {
-    let resp = post_token(Some(ORIGIN), "{\"code\":".into()).await;
+    let resp = post_token(&[ccdp_origin()], "{\"code\":".into()).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn github_token_refuses_an_over_long_code() {
     assert_eq!(
-        answer_with_no_permit_free(token_body(&"a".repeat(4096), VERIFIER)).await,
+        posted_with_no_permit_free(token_body(&"a".repeat(4096), VERIFIER))
+            .await
+            .status(),
         StatusCode::BAD_REQUEST
     );
 }
@@ -217,7 +213,9 @@ async fn github_token_refuses_an_over_long_code() {
 #[tokio::test]
 async fn github_token_refuses_a_verifier_of_the_wrong_length() {
     assert_eq!(
-        answer_with_no_permit_free(token_body(CODE, "tooshort")).await,
+        posted_with_no_permit_free(token_body(CODE, "tooshort"))
+            .await
+            .status(),
         StatusCode::BAD_REQUEST
     );
 }
@@ -228,44 +226,36 @@ async fn github_token_refuses_a_verifier_of_the_wrong_length() {
 #[tokio::test]
 async fn a_body_within_the_bounds_gets_past_them() {
     assert_eq!(
-        answer_with_no_permit_free(valid_body()).await,
+        posted_with_no_permit_free(valid_body()).await.status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
 
-/// Post a body to a deployment holding every exchange permit, and answer what
-/// the route said. Nothing is dialled: the permit gate refuses first.
-async fn answer_with_no_permit_free(body: String) -> StatusCode {
-    let state = test_state();
+/// Post a body from the CCDP origin to a deployment holding every exchange
+/// permit. Nothing is dialled: the permit gate refuses first.
+async fn posted_with_no_permit_free(body: String) -> axum::response::Response {
+    let state = test_state().await;
     let _held = state
         .exchange_permits()
         .expect("github is enabled")
         .try_acquire_many(libid_server_rs::state::MAX_CONCURRENT_EXCHANGES as u32)
         .expect("every permit is free at the start of this test");
-    let req = Request::post("/api/v1/ceremony/github-token")
-        .header("content-type", "application/json")
-        .header("origin", ORIGIN)
-        .body(Body::from(body))
-        .unwrap();
-    app(state.clone()).oneshot(req).await.unwrap().status()
+    app(state.clone())
+        .oneshot(token_request(
+            TOKEN,
+            "application/json",
+            &[ccdp_origin()],
+            body,
+        ))
+        .await
+        .unwrap()
 }
 
 /// A request that finds every exchange permit held is shed with `503`, not
 /// queued.
 #[tokio::test]
 async fn github_token_sheds_when_no_permit_is_free() {
-    let req = Request::post("/api/v1/ceremony/github-token")
-        .header("content-type", "application/json")
-        .header("origin", ORIGIN)
-        .body(Body::from(valid_body()))
-        .unwrap();
-    let state = test_state();
-    let _held = state
-        .exchange_permits()
-        .expect("github is enabled")
-        .try_acquire_many(libid_server_rs::state::MAX_CONCURRENT_EXCHANGES as u32)
-        .expect("every permit is free at the start of this test");
-    let resp = app(state.clone()).oneshot(req).await.unwrap();
+    let resp = posted_with_no_permit_free(valid_body()).await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
@@ -273,30 +263,28 @@ async fn github_token_sheds_when_no_permit_is_free() {
 /// Whatever the body, a foreign origin is answered `403`.
 #[tokio::test]
 async fn github_token_checks_the_origin_before_the_body() {
-    let resp = post_token(Some("https://evil.example"), "not json at all".into()).await;
+    let resp = post_token(&["https://evil.example"], "not json at all".into()).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 /// A `schema` member is an additional field, and refused.
 #[tokio::test]
 async fn github_token_refuses_a_body_carrying_a_schema() {
-    let body = format!(
-        r#"{{"schema":1,"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#
-    );
-    let resp = post_token(Some(ORIGIN), body).await;
+    let body = token_body_with(&[("schema", "1")]);
+    let resp = post_token(&[ccdp_origin()], body).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// The preflight admits exactly what the handler does: every origin in the
-/// effective set, `POST`, `Content-Type`, no credentials.
+/// The preflight admits exactly what the handler does: the CCDP origin,
+/// `POST`, `Content-Type`, no credentials.
 #[tokio::test]
 async fn the_token_preflight_admits_exactly_what_the_handler_does() {
     let preflight = |origin: &'static str| async move {
-        app(test_state())
+        app(test_state().await)
             .oneshot(
                 Request::builder()
                     .method("OPTIONS")
-                    .uri("/api/v1/ceremony/github-token")
+                    .uri(TOKEN)
                     .header("origin", origin)
                     .header("access-control-request-method", "POST")
                     .body(Body::empty())
@@ -306,10 +294,10 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
             .unwrap()
     };
 
-    let resp = preflight(ORIGIN).await;
+    let resp = preflight(ccdp_origin()).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let h = resp.headers();
-    assert_eq!(h.get("access-control-allow-origin").unwrap(), ORIGIN);
+    assert_eq!(h.get("access-control-allow-origin").unwrap(), ccdp_origin());
     assert_eq!(h.get("access-control-allow-methods").unwrap(), "POST");
     assert_eq!(
         h.get("access-control-allow-headers").unwrap(),
@@ -332,7 +320,7 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
 /// This bridge's own origin is not the CCDP origin, so it is refused.
 #[tokio::test]
 async fn github_token_admits_the_ccdp_origin_and_not_the_bridges_own() {
-    let resp = post_token(Some("http://127.0.0.1:8722"), valid_body()).await;
+    let resp = post_token(&["http://127.0.0.1:8722"], valid_body()).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
@@ -340,7 +328,7 @@ async fn github_token_admits_the_ccdp_origin_and_not_the_bridges_own() {
 
 async fn get_config(origin: Option<&str>, query: &str) -> axum::response::Response {
     let headers: Vec<(&str, &str)> = origin.into_iter().map(|o| ("origin", o)).collect();
-    config_with(test_state(), &headers, query).await
+    config_with(test_state().await, &headers, query).await
 }
 
 /// The same route with arbitrary headers.
@@ -390,9 +378,9 @@ async fn config_refuses_an_absent_or_unlisted_origin() {
         // A browser sends this for an opaque origin.
         Some("null"),
         // Near misses. A browser sends none of these for an admitted page.
-        Some("http://LOCALHOST:3000"),
-        Some("http://localhost:3000/"),
-        Some("http://localhost:3001"),
+        Some("https://APP.example"),
+        Some("https://app.example/"),
+        Some("https://app.example:8443"),
     ] {
         let resp = get_config(origin, "").await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{origin:?}");
@@ -410,7 +398,7 @@ async fn config_refuses_an_absent_or_unlisted_origin() {
 #[tokio::test]
 async fn config_refuses_an_origin_sent_twice() {
     let two_origins = config_with(
-        test_state(),
+        test_state().await,
         &[("origin", APP_ORIGIN), ("origin", "https://evil.example")],
         "",
     )
@@ -422,7 +410,7 @@ async fn config_refuses_an_origin_sent_twice() {
 #[tokio::test]
 async fn config_admits_nothing_on_referer_or_host() {
     let resp = config_with(
-        test_state(),
+        test_state().await,
         &[
             ("referer", "http://127.0.0.1:8722/"),
             ("host", "127.0.0.1:8722"),
@@ -436,12 +424,16 @@ async fn config_admits_nothing_on_referer_or_host() {
 /// The response varies on `Origin`, on refusals too.
 #[tokio::test]
 async fn config_varies_on_origin() {
-    let admitted = config_with(test_state(), &[("origin", APP_ORIGIN)], "").await;
+    let admitted = config_with(test_state().await, &[("origin", APP_ORIGIN)], "").await;
     assert_eq!(admitted.status(), StatusCode::OK);
     assert_eq!(admitted.headers().get("vary").unwrap(), "origin");
 
-    let refused =
-        config_with(test_state(), &[("origin", "https://evil.example")], "").await;
+    let refused = config_with(
+        test_state().await,
+        &[("origin", "https://evil.example")],
+        "",
+    )
+    .await;
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
     assert_eq!(refused.headers().get("vary").unwrap(), "origin");
 }
@@ -455,13 +447,13 @@ async fn config_carries_no_secret_and_no_admitted_origin() {
     let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(keys, ["callbackPath", "ccdpOrigin", "platforms"]);
-    assert_eq!(body["ccdpOrigin"], CCDP_ORIGIN);
+    assert_eq!(body["ccdpOrigin"], ccdp_origin());
     assert_eq!(body["callbackPath"], "/auth/callback");
-    assert_eq!(body["platforms"]["github"]["clientId"], "test-client-id");
+    assert_eq!(body["platforms"]["github"]["clientId"], fixtures::CLIENT_ID);
     assert_eq!(body["platforms"]["github"]["ceremonyVersions"][0], 1);
 
     let raw = body.to_string();
-    assert!(!raw.contains("test-client-secret"));
+    assert!(!raw.contains(fixtures::CLIENT_SECRET));
     assert!(!raw.contains(APP_ORIGIN));
     assert!(
         !raw.contains("circuitUrl"),
@@ -489,16 +481,20 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
 async fn the_token_route_is_absent_when_github_is_not_enabled() {
     let state = deployment(&[
         "--platforms",
-        r#"[{"id":"x","client_id":"test-client-id","versions":[1]}]"#,
+        r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
         "--gh-oauth-client-secret",
         "",
-    ]);
-    let req = Request::post("/api/v1/ceremony/github-token")
-        .header("content-type", "application/json")
-        .header("origin", ORIGIN)
-        .body(Body::from(valid_body()))
+    ])
+    .await;
+    let resp = app(state)
+        .oneshot(token_request(
+            TOKEN,
+            "application/json",
+            &[ccdp_origin()],
+            valid_body(),
+        ))
+        .await
         .unwrap();
-    let resp = app(state).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -509,7 +505,7 @@ async fn get_callback(path: &str, headers: &[(&str, &str)]) -> axum::response::R
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
-    app(test_state())
+    app(test_state().await)
         .oneshot(req.body(Body::empty()).unwrap())
         .await
         .unwrap()
@@ -581,7 +577,10 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     ] {
         assert_eq!(directive(name), format!("{name} 'none'"));
     }
-    assert_eq!(directive("frame-src"), format!("frame-src {CCDP_ORIGIN}"));
+    assert_eq!(
+        directive("frame-src"),
+        format!("frame-src {}", ccdp_origin())
+    );
     assert_eq!(directive("connect-src"), "connect-src 'none'");
     assert_eq!(directive("style-src"), "style-src 'unsafe-inline'");
 
@@ -597,14 +596,14 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     }
     // No external script source: the artifact bundles its dependencies.
     assert!(
-        !script_src.contains(CCDP_ORIGIN),
+        !script_src.contains(ccdp_origin()),
         "an external script source survived in {script_src}"
     );
 
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("<main id=\"libid-root\"></main>"));
-    assert!(!html.contains("test-client-secret"));
+    assert!(!html.contains(fixtures::CLIENT_SECRET));
 
     // One module script, and one hash naming it.
     assert_eq!(html.matches("<script type=\"module\">").count(), 1);
@@ -625,7 +624,7 @@ async fn the_callback_document_carries_the_exact_response_policy() {
 #[tokio::test]
 async fn the_callback_document_admits_only_get() {
     let req = Request::post("/auth/callback").body(Body::empty()).unwrap();
-    let resp = app(test_state()).oneshot(req).await.unwrap();
+    let resp = app(test_state().await).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
@@ -647,12 +646,13 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
 /// spent.
 #[tokio::test]
 async fn github_token_refuses_a_query() {
-    let req = Request::post("/api/v1/ceremony/github-token?trace=1")
-        .header("content-type", "application/json")
-        .header("origin", ORIGIN)
-        .body(Body::from(valid_body()))
-        .unwrap();
-    let resp = app(test_state()).oneshot(req).await.unwrap();
+    let req = token_request(
+        &format!("{TOKEN}?trace=1"),
+        "application/json",
+        &[ccdp_origin()],
+        valid_body(),
+    );
+    let resp = app(test_state().await).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -661,19 +661,15 @@ async fn github_token_refuses_a_query() {
 async fn github_token_takes_exactly_one_media_type() {
     // A body the media check passes and validation refuses: an accepted media
     // type is proved by exactly `400`.
-    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
+    let body = token_body(CODE, "tooshort");
     for (media, admitted) in [
         ("application/json", true),
         ("application/json; charset=utf-8", true),
         ("application/vnd.libid+json", false),
         ("text/plain", false),
     ] {
-        let req = Request::post("/api/v1/ceremony/github-token")
-            .header("content-type", media)
-            .header("origin", ORIGIN)
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app(test_state()).oneshot(req).await.unwrap();
+        let req = token_request(TOKEN, media, &[ccdp_origin()], body.clone());
+        let resp = app(test_state().await).oneshot(req).await.unwrap();
         let expected = if admitted {
             StatusCode::BAD_REQUEST
         } else {
@@ -688,13 +684,11 @@ async fn github_token_takes_exactly_one_media_type() {
 /// fails at once and the answer is a `502`.
 #[tokio::test]
 async fn github_token_refuses_a_private_notary_and_dials_a_loopback_one() {
-    let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"https://10.0.0.1:7048"}}"#
-    );
-    let resp = post_token(Some(ORIGIN), body).await;
+    let body = token_body_with(&[("notaryAddress", "https://10.0.0.1:7048")]);
+    let resp = post_token(&[ccdp_origin()], body).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-    let resp = post_token(Some(ORIGIN), valid_body()).await;
+    let resp = post_token(&[ccdp_origin()], valid_body()).await;
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
 
@@ -703,12 +697,10 @@ async fn github_token_refuses_a_private_notary_and_dials_a_loopback_one() {
 #[tokio::test]
 async fn github_token_admits_the_localhost_http_exception_and_nothing_like_it() {
     for admitted in ["http://localhost:7048", "http://127.0.0.1:7048"] {
-        let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{admitted}"}}"#
-        );
+        let body = token_body_with(&[("notaryAddress", admitted)]);
         // Past the gate and dialled, on a port nothing listens on: a `502` is
         // the origin being admitted, where a `400` would be it refused.
-        let resp = post_token(Some(ORIGIN), body).await;
+        let resp = post_token(&[ccdp_origin()], body).await;
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "{admitted}");
     }
     for refused in [
@@ -716,10 +708,8 @@ async fn github_token_admits_the_localhost_http_exception_and_nothing_like_it() 
         "http://[::1]:7048",
         "http://notary.example",
     ] {
-        let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{refused}"}}"#
-        );
-        let resp = post_token(Some(ORIGIN), body).await;
+        let body = token_body_with(&[("notaryAddress", refused)]);
+        let resp = post_token(&[ccdp_origin()], body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{refused}");
     }
 }
@@ -738,10 +728,8 @@ async fn github_token_refuses_an_invalid_notary_origin() {
         "not a url",
         "",
     ] {
-        let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{bad}"}}"#
-        );
-        let resp = post_token(Some(ORIGIN), body).await;
+        let body = token_body_with(&[("notaryAddress", bad)]);
+        let resp = post_token(&[ccdp_origin()], body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad:?}");
     }
 }
@@ -749,10 +737,7 @@ async fn github_token_refuses_an_invalid_notary_origin() {
 /// `notaryAddress` is required.
 #[tokio::test]
 async fn github_token_refuses_a_body_without_a_notary_address() {
-    let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}"}}"#
-    );
-    let resp = post_token(Some(ORIGIN), body).await;
+    let resp = post_token(&[ccdp_origin()], token_body_without("notaryAddress")).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -760,22 +745,14 @@ async fn github_token_refuses_a_body_without_a_notary_address() {
 #[tokio::test]
 async fn github_token_admits_the_ccdp_origin_and_nothing_else() {
     // A body validation refuses, so admission is proved without a session.
-    let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort","notaryAddress":"https://127.0.0.1:7048"}"#;
     let post = |origins: Vec<&'static str>| async move {
-        let mut req = Request::post("/api/v1/ceremony/github-token")
-            .header("content-type", "application/json");
-        for origin in origins {
-            req = req.header("origin", origin);
-        }
-        app(test_state())
-            .oneshot(req.body(Body::from(body)).unwrap())
+        post_token(&origins, token_body(CODE, "tooshort"))
             .await
-            .unwrap()
             .status()
     };
 
     assert_eq!(
-        post(vec![ORIGIN]).await,
+        post(vec![ccdp_origin()]).await,
         StatusCode::BAD_REQUEST,
         "the CCDP origin"
     );
@@ -789,8 +766,8 @@ async fn github_token_admits_the_ccdp_origin_and_nothing_else() {
         vec!["not a url"],
         vec![],
         // The right origin twice is still two origins.
-        vec![ORIGIN, ORIGIN],
-        vec![ORIGIN, "https://evil.example"],
+        vec![ccdp_origin(), ccdp_origin()],
+        vec![ccdp_origin(), "https://evil.example"],
     ] {
         assert_eq!(
             post(origins.clone()).await,
@@ -804,12 +781,12 @@ async fn github_token_admits_the_ccdp_origin_and_nothing_else() {
 /// unserved path answers no preflight and carries no allow-origin header.
 #[tokio::test]
 async fn no_cors_reaches_a_path_this_bridge_does_not_serve() {
-    let resp = app(test_state())
+    let resp = app(test_state().await)
         .oneshot(
             Request::builder()
                 .method("OPTIONS")
                 .uri("/does-not-exist")
-                .header("origin", CCDP_ORIGIN)
+                .header("origin", ccdp_origin())
                 .header("access-control-request-method", "POST")
                 .body(Body::empty())
                 .unwrap(),
@@ -824,10 +801,10 @@ async fn no_cors_reaches_a_path_this_bridge_does_not_serve() {
     assert!(resp.headers().get("access-control-allow-methods").is_none());
     assert!(resp.headers().get("access-control-allow-origin").is_none());
 
-    let resp = app(test_state())
+    let resp = app(test_state().await)
         .oneshot(
             Request::get("/does-not-exist")
-                .header("origin", CCDP_ORIGIN)
+                .header("origin", ccdp_origin())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -843,9 +820,8 @@ async fn no_cors_reaches_a_path_this_bridge_does_not_serve() {
 /// A body over the ceiling is answered `413`.
 #[tokio::test]
 async fn github_token_says_so_when_the_body_is_over_the_limit() {
-    let code = "a".repeat(16 * 1024);
-    let body = format!(r#"{{"code":"{code}","codeVerifier":"{VERIFIER}"}}"#);
-    let resp = post_token(Some(ORIGIN), body).await;
+    let body = token_body(&"a".repeat(16 * 1024), VERIFIER);
+    let resp = post_token(&[ccdp_origin()], body).await;
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
@@ -853,10 +829,8 @@ async fn github_token_says_so_when_the_body_is_over_the_limit() {
 /// byte offsets, does not travel.
 #[tokio::test]
 async fn a_refusal_body_quotes_nothing_the_caller_sent() {
-    let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","zzMarkerFieldzz":1}}"#
-    );
-    let resp = post_token(Some(ORIGIN), body).await;
+    let body = token_body_with(&[("zzMarkerFieldzz", "1")]);
+    let resp = post_token(&[ccdp_origin()], body).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let text = body_of(resp).await.to_string();
     assert!(
