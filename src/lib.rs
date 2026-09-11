@@ -151,9 +151,11 @@ async fn callback_source(
             url: url.clone(),
             detail: format!("{e}"),
         })?
-        // `None` answers only a request that carried a validator; a `304` to
-        // an unconditional request is refused inside `retrieve`.
-        .expect("an unconditional retrieval yields a document or an error");
+        .ok_or_else(|| Error::ArtifactUnavailable {
+            url: url.clone(),
+            detail: "answered 304 Not Modified to a request carrying no If-None-Match"
+                .into(),
+        })?;
     tracing::info!(
         url,
         etag = published.etag.as_deref().unwrap_or("<none>"),
