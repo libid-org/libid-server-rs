@@ -1,21 +1,7 @@
 //! Reading a Callback artifact well enough to serve it, and refusing anything
-//! else.
-//!
-//! This is a tag-level tokenizer, not an HTML parser: it builds no tree,
-//! resolves no entities and recovers from nothing. It exists to answer two
-//! questions -- where is the configuration slot, and which byte ranges will the
-//! browser execute -- and to refuse any document where it cannot answer both
-//! with certainty.
-//!
-//! A substring search for `<script` would be shorter and wrong. It cannot tell
-//! a tag from the same text inside an attribute value or a comment, and the
-//! cost of being wrong is not a missed element: it is a policy that names the
-//! hash of a different span than the browser runs, served `200`, with the
-//! document silently refusing to execute.
-//!
-//! The artifact is build-generated, so it can be held to a shape. Everything
-//! here refuses rather than interprets, and three of the rules are about hash
-//! correctness rather than tidiness -- they are marked where they appear.
+//! else: a tag-level tokenizer that finds the configuration slot and the byte
+//! ranges the browser executes, and refuses any document where it cannot
+//! determine both.
 
 use std::ops::Range;
 
@@ -27,24 +13,13 @@ const MODULE_OPEN: &str = "<script type=\"module\">";
 const SCRIPT_CLOSE: &str = "</script>";
 
 /// The largest artifact this bridge will read.
-///
-/// A bundled Callback plausibly runs a few hundred KiB. Sized against the token
-/// route's 3 MiB response bound so the two are recognisably the same order, and
-/// finite because an unbounded read from a remote origin is a memory budget
-/// someone else controls.
 pub(crate) const MAX_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
 
 /// The most executable scripts a document may carry.
-///
-/// The contract's example has one. More is allowed because "hashes" is plural
-/// there, but an artifact with dozens is not the shape this was written for.
 const MAX_EXECUTABLES: usize = 8;
 
-/// Why an artifact was refused.
-///
-/// Every variant is a refusal to serve, never a repair. The bridge has one
-/// valid document already; a second that it does not fully understand is worth
-/// less than the one it has.
+/// Why an artifact was refused. Every variant is a refusal to serve, never a
+/// repair.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ArtifactError {
     #[error("the artifact is {0} bytes, over the {MAX_ARTIFACT_BYTES}-byte bound")]
@@ -100,9 +75,7 @@ impl Layout {
             };
             let open = at + next;
 
-            // A `<` in text that is not a tag start. `&lt;` is how a document says
-            // it means the character, and an artifact that does not is one whose
-            // author and this reader disagree about where elements begin.
+            // A `<` in text that is not a tag start; a document writes `&lt;`.
             let rest = &html[open..];
             if rest.starts_with(SLOT_OPEN) {
                 let text = open + SLOT_OPEN.len();
@@ -115,9 +88,7 @@ impl Layout {
                 executables.push(text..end);
                 at = end + SCRIPT_CLOSE.len();
             } else if let Some(after) = foreign_subtree(html, open)? {
-                // Foreign content. The artifact is documented as carrying an
-                // inline logo, so refusing SVG outright would refuse every real
-                // artifact -- and it would do so late, after vendoring.
+                // Foreign content: an inline logo is stepped over.
                 at = after;
             } else if rest
                 .as_bytes()
@@ -125,9 +96,7 @@ impl Layout {
                 .is_some_and(|t| t.eq_ignore_ascii_case(b"script"))
             {
                 // Any other script element: a `src`, a nonce, a classic script, an
-                // attribute in another order. Each is a shape this bridge has not
-                // reasoned about, and refusing costs a log line while guessing
-                // costs a wrong hash.
+                // attribute in another order.
                 return Err(ArtifactError::UnreadableScript(open));
             } else {
                 if rest.starts_with("<main id=\"libid-root\"></main>") {
@@ -137,10 +106,8 @@ impl Layout {
             }
         }
 
-        // Exactly one slot ELEMENT. Whether it still holds the marker is not asked
-        // here: this runs twice, once on the artifact and once on the composed
-        // document, and substitution is precisely what removes the marker.
-        // [`super::compose`] owns that rule.
+        // Exactly one slot element. Whether it holds the marker is
+        // [`super::compose`]'s rule: this runs on the composed document too.
         if slots.len() != 1 {
             return Err(ArtifactError::Markers(slots.len()));
         }
@@ -156,15 +123,6 @@ impl Layout {
 }
 
 /// Case-insensitive prefix test that allocates nothing.
-///
-/// The whole reason both of these exist: every case-insensitive comparison in
-/// this module used to materialise a lowercase copy of whatever it was about
-/// to search. For a prefix test that copied the entire remaining document to
-/// look at ten bytes, and inside the foreign-content walk it copied the tail
-/// once per element, which is quadratic on a document this bridge does not
-/// author. Comparing in place is also the more honest statement: the needle is
-/// ASCII and the haystack is bytes, and neither needs a new allocation to say
-/// whether one starts the other.
 fn starts_with_ci(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .get(..needle.len())
@@ -182,36 +140,23 @@ fn find_ci(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Bytes that make the rest of this reader unsound, refused before anything
 /// else looks at the document.
 fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
-    // HASH CORRECTNESS. The HTML input stream normalises CR and CRLF to LF
-    // before tokenizing, so a `\r` inside a script means the browser hashes
-    // bytes this bridge never saw. The policy would then name a hash of
-    // something nobody executes.
+    // The HTML input stream normalises CR and CRLF to LF before tokenizing, so
+    // a `\r` inside a script is hashed differently by the browser.
     if let Some(i) = html.find('\r') {
         return Err(ArtifactError::Forbidden("a carriage return", i));
     }
-    // HASH CORRECTNESS. Inside script data `<!--` enters the escaped states,
-    // where `</script>` no longer necessarily ends the element -- so "the first
-    // `</script>` terminates" quietly stops being true and the hashed span is
-    // shorter than the executed one. A generated bundle needs no comments.
+    // Inside script data `<!--` enters the escaped states, where `</script>`
+    // does not necessarily end the element.
     if let Some(i) = html.find("<!--") {
         return Err(ArtifactError::Forbidden("an HTML comment", i));
     }
-    // HASH CORRECTNESS. In foreign content `<script>` is parsed as markup
-    // rather than raw text. Rather than track insertion modes, refuse the
-    // elements that open one.
-    // Lowercased ONCE. Inside the loop this allocated a copy of the whole
-    // document per needle, and `compose` scans twice.
-    // `<svg` and `<math` are NOT here: the artifact carries an inline logo, so
-    // they are stepped over by `foreign_subtree` and refused only if one holds
-    // a `<script`.
-    // `<?` carries no letter, so it needs no case folding and no copy.
+    // In foreign content `<script>` is parsed as markup rather than raw text.
+    // `<svg` and `<math` are stepped over by `foreign_subtree` and refused
+    // only if one holds a `<script`.
     if let Some(i) = html.find("<?") {
         return Err(ArtifactError::Forbidden("a processing instruction", i));
     }
-    // `<![` carries no letter, so the scan that finds it needs no case
-    // folding -- and `str::find` on three bytes is a different cost from
-    // comparing nine case-insensitively at every offset. Only the word after
-    // it has to be matched either way, and only where the bracket already is.
+    // `<![` needs no case folding; the word after it does.
     let mut from = 0;
     while let Some(k) = html[from..].find("<![") {
         let i = from + k;
@@ -230,34 +175,21 @@ fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
     Ok(())
 }
 
-/// Skip an `<svg>` or `<math>` subtree, or return `None` if this tag opens
-/// neither.
-///
-/// HASH CORRECTNESS. Inside foreign content `<script>` is parsed as markup
-/// rather than raw text, so the "first `</script>` terminates" rule this reader
-/// depends on does not hold there. Rather than track insertion modes, the
-/// subtree is stepped over whole and refused if it contains a `<script` at all
-/// -- which an inline logo has no reason to.
+/// Skip an `<svg>` or `<math>` subtree, refusing one that contains a
+/// `<script` (inside foreign content `<script>` is parsed as markup), or
+/// return `None` if this tag opens neither.
 fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactError> {
     let rest = &html[open..];
     let name = ["svg", "math"]
         .into_iter()
-        // Compared as BYTES. `rest` is `&str`, and slicing it at a fixed byte
-        // index panics when that index lands inside a multi-byte character --
-        // `<p>é` puts one at 3, which `rest[1..4]` would split. The artifact is
-        // not this bridge's to author, so a localised one must be refused with
-        // an error naming the setting, never abort the process.
+        // Compared as bytes: slicing `&str` at a fixed byte index panics inside
+        // a multi-byte character.
         .find(|n| {
             rest.as_bytes()
                 .get(1..=n.len())
                 .is_some_and(|t| t.eq_ignore_ascii_case(n.as_bytes()))
-                // And the name ENDS there. Without this, `svg` and `math`
-                // match as prefixes, so `<math-field>` -- an ordinary custom
-                // element, and custom elements must carry a hyphen -- is
-                // stepped over as foreign content, taking any `<script>` after
-                // it inside the skipped span with it. That script is then
-                // neither hashed nor named in the policy, and the browser
-                // refuses to run the document this bridge just served `200`.
+                // The name ends there: `<math-field>` is a custom element, not
+                // foreign content.
                 && rest
                     .as_bytes()
                     .get(1 + n.len())
@@ -302,12 +234,8 @@ fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactErr
     Ok(Some(end))
 }
 
-/// The end of a script element's text, requiring the exact terminator.
-///
-/// `</script >` and `</script\n>` also close an element for a browser. Only the
-/// three-byte-plus-name form is read here, and the build escapes every other
-/// `</script` in its bundle as `<\/script`, so a document reaching the looser
-/// spellings is one this reader would measure differently from the browser.
+/// The end of a script element's text, requiring the exact `</script>`
+/// terminator; `</script >` and `</script\n>` are refused.
 fn close_of(html: &str, text_start: usize) -> Result<usize, ArtifactError> {
     let tail = &html[text_start..];
     match tail.find(SCRIPT_CLOSE) {
@@ -325,12 +253,8 @@ fn close_of(html: &str, text_start: usize) -> Result<usize, ArtifactError> {
 }
 
 /// Step over one non-script tag, refusing any spelling this reader does not
-/// fully understand.
-///
-/// Deliberately narrow. It does not police inline handlers, `javascript:`,
-/// `<base>`, `<link>` or `<iframe>` -- the composed policy blocks every one of
-/// them with `script-src` hashes, `base-uri 'none'`, `default-src 'none'` and a
-/// CCDP-only `frame-src`. Keeping this small is what keeps it reviewable.
+/// fully understand. Inline handlers, `javascript:`, `<base>`, `<link>` and
+/// `<iframe>` are left to the composed policy.
 fn ordinary_tag(html: &str, open: usize) -> Result<usize, ArtifactError> {
     let bytes = html.as_bytes();
     let mut i = open + 1;
@@ -360,17 +284,8 @@ fn ordinary_tag(html: &str, open: usize) -> Result<usize, ArtifactError> {
     end_of_tag(html, open, i)
 }
 
-/// Walk to the `>` of a tag.
-///
-/// A double-quoted value is skipped whole, because a `>` inside one does not
-/// end the tag and a reader that stopped there would measure the document
-/// differently from the browser. An UNQUOTED value needs no such care: it
-/// cannot contain `>` by definition, so the first one still ends the tag.
-///
-/// A single-quoted value is refused rather than skipped. HTML admits it and a
-/// `>` inside one does not end the tag, so honouring it would mean tracking a
-/// second quoting style — and a build-generated artifact has no reason to use
-/// one. Refusing is cheaper than being subtly wrong about it.
+/// Walk to the `>` of a tag. A double-quoted value is skipped whole, an
+/// unquoted value cannot contain `>`, and a single-quoted value is refused.
 fn end_of_tag(html: &str, open: usize, mut i: usize) -> Result<usize, ArtifactError> {
     let bytes = html.as_bytes();
     while i < bytes.len() {
@@ -392,11 +307,8 @@ fn end_of_tag(html: &str, open: usize, mut i: usize) -> Result<usize, ArtifactEr
 
 #[cfg(test)]
 mod tests {
-    /// The CDATA rule, which had no test before the scan behind it changed.
-    ///
-    /// `<![` is what the scan looks for and `cdata[` is what it then confirms,
-    /// so the cases that matter are the spelling, the case folding, and a `<![`
-    /// that begins no CDATA section at all.
+    /// The CDATA rule: the spelling, the case folding, and a `<![` that begins
+    /// no CDATA section.
     #[test]
     fn a_cdata_section_is_refused_however_it_is_spelled() {
         for body in ["<![CDATA[x]]>", "<![cdata[x]]>", "<![CdAtA[x]]>"] {
@@ -421,13 +333,7 @@ mod tests {
         ));
     }
 
-    /// A localised artifact must SCAN, not panic and not be refused.
-    ///
-    /// Non-ASCII in markup is ordinary, so the contract here is acceptance.
-    /// Every one of these puts a multi-byte character at the byte index the
-    /// foreign-content and script tests read; slicing `&str` there panics.
-    /// Asserting only "does not unwind" would pass on a reader that refused
-    /// every localised document, which is the other way to get this wrong.
+    /// A localised artifact scans: neither a panic nor a refusal.
     #[test]
     fn a_multi_byte_character_scans_rather_than_panicking() {
         for text in [
@@ -448,9 +354,7 @@ mod tests {
 
     use super::*;
 
-    /// A document in the canonical shape, with one thing varied per test. The
-    /// build emits exactly this shape, so a fixture that drifts from it would
-    /// be testing a document nobody serves.
+    /// A document in the canonical shape, with one thing varied per test.
     fn doc(body: &str) -> String {
         format!(
             "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">\
@@ -471,9 +375,7 @@ mod tests {
         assert_eq!(layout.executables.len(), 1);
     }
 
-    /// The hashed span is exactly the bytes between `>` and `</script>` --
-    /// neither tag included, nothing trimmed. A CSP hash covers that span and
-    /// nothing else, so an off-by-one here is a policy the browser rejects.
+    /// The hashed span is exactly the bytes between `>` and `</script>`.
     #[test]
     fn the_executable_span_is_the_script_text_exactly() {
         let html = module("let x = 1;");
@@ -481,8 +383,7 @@ mod tests {
         assert_eq!(&html[layout.executables[0].clone()], "let x = 1;");
     }
 
-    /// Three rules about hash correctness rather than tidiness. Each makes the
-    /// browser hash bytes this reader did not measure.
+    /// Three refusals about hash correctness.
     #[test]
     fn bytes_that_would_desynchronise_the_hash_are_refused() {
         // CR is normalised to LF by the HTML input stream before tokenizing.
@@ -491,7 +392,7 @@ mod tests {
             Err(ArtifactError::Forbidden("a carriage return", _))
         ));
         // `<!--` in script data enters the escaped states, where `</script>`
-        // no longer necessarily closes the element.
+        // does not necessarily close the element.
         assert!(matches!(
             Layout::scan(&module("<!-- x -->")),
             Err(ArtifactError::Forbidden("an HTML comment", _))
@@ -511,12 +412,8 @@ mod tests {
         ));
     }
 
-    /// Every script shape but the two this bridge reads. Each would otherwise
-    /// be hashed wrongly, or not hashed at all.
-    /// The artifact is documented as carrying an inline logo, so foreign
-    /// content is stepped over rather than refused -- but a `<script>` inside
-    /// it is parsed as markup rather than raw text, and this reader would then
-    /// measure a different span than the browser executes.
+    /// Every script shape but the two this bridge reads is refused; foreign
+    /// content is stepped over, and a `<script>` inside it is refused.
     #[test]
     fn foreign_content_is_stepped_over_and_a_script_inside_one_is_not() {
         for logo in [
@@ -534,12 +431,8 @@ mod tests {
             assert_eq!(&html[layout.executables[0].clone()], "let x = 1;");
         }
 
-        // An element whose NAME merely STARTS with one of those is not foreign
-        // content. Custom elements must carry a hyphen, so `<math-field>` is
-        // an ordinary one -- and a bundled Callback that used it had its
-        // module read as a script inside MathML and the whole artifact
-        // refused, which under a retrieving deployment is a bridge that will
-        // not start.
+        // An element whose name merely starts with `svg` or `math` is not
+        // foreign content.
         for ordinary in [
             "<math-field><script type=\"module\">let x = 1;</script></math-field>",
             "<svg-icon>logo</svg-icon><script type=\"module\">let x = 1;</script>",
@@ -594,10 +487,7 @@ mod tests {
         }
     }
 
-    /// `</script >` and `</script\n>` also close an element for a browser, so
-    /// a body containing one would end earlier for the browser than for this
-    /// reader. The build escapes every `</script` in its bundle for exactly
-    /// this reason.
+    /// `</script >` and `</script\n>` are refused.
     #[test]
     fn a_loose_close_inside_a_script_is_refused() {
         for hostile in ["</script >", "</script\n>", "</SCRIPT>"] {
@@ -611,10 +501,8 @@ mod tests {
 
     #[test]
     fn a_tag_this_reader_cannot_bound_is_refused() {
-        // A single-quoted value, whose `>` this reader would stop at and a
-        // browser would not, and a bare `<` a document should have written
-        // `&lt;`. An UNQUOTED value is fine and deliberately not listed: it
-        // cannot contain `>`, so the tag still ends where both agree.
+        // A single-quoted value and a bare `<` are refused; an unquoted value
+        // is admitted.
         for hostile in ["<p class='x'>", "<p>a < b</p>"] {
             assert!(
                 matches!(

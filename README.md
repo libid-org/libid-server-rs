@@ -1,12 +1,11 @@
 # libid-server-rs
 
-The server side of a libID ceremony, and deliberately almost nothing.
+The server side of a libID ceremony.
 
 A platform ceremony runs in the browser: it opens the provider, consumes the
 redirect against its own live state, notarizes what it needs, and builds the
-proof. The one thing a browser cannot hold is a confidential client secret,
-which is why GitHub's token exchange happens here and why this service exists
-at all. Google and X need no confidential route from it, and get none.
+proof. The one thing a browser cannot hold is a confidential client secret, so
+GitHub's token exchange happens here. Google and X have no confidential route.
 
 It keeps no ceremony state, no session, no challenge and no result. A timeout,
 a duplicate request, a restart or a lost response leave no record here, and
@@ -57,20 +56,15 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
 | `GET` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ callbackPath, ccdpOrigin, platforms }`. Readable only from an admitted origin. |
 | `GET` | `{CALLBACK_PATH}` (default `/auth/callback`) | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
-| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin — narrower than `/config`, which admits the whole allowlist — and it answers that origin's preflight. The body carries `notaryAddress`, the notary the browser resolved from the ledger; this bridge dials the same host on the wire port, refusing a private or internal one. `403` for any other origin or a refused notary, `400` for a query, `415` for any media type but exactly `application/json`. |
+| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin, whose preflight it answers. The body carries `notaryAddress`, the notary the browser resolved from the ledger; this bridge dials the same host on the wire port, refusing a private or internal one. `403` for any other origin or a refused notary, `400` for a query, `415` for any media type but exactly `application/json`. |
 
-The contract's route surface is closed — "the bridge exposes only" the last
-three — so `/health` is a deliberate deviation, kept because the published
-image declares a `HEALTHCHECK` against it and an orchestrator needs somewhere
-to ask. It takes no ceremony input, reads nothing from the request and answers
-two bytes. It is also the one route that tolerates a query: a liveness probe
-that answered `400` to a cache-buster would report a healthy service as
-unhealthy and be restarted for it.
+`/health` is not one of the contract's three routes. The published image's
+`HEALTHCHECK` targets it; it reads nothing from the request, answers two bytes,
+and is the one route that accepts a query.
 
 ### `POST /api/v1/ceremony/github-token`
 
-The one route a platform ceremony genuinely requires of a server, because it is
-the one step needing a client secret.
+The one route needing a client secret.
 
 Request — the code, the PKCE verifier, the redirect URI the authorization
 request carried, and the notary the browser resolved from the ledger; the
@@ -98,25 +92,18 @@ byte strings, unpadded URL-safe base64:
 }
 ```
 
-No `schema` member is carried: the route's path already versions this
-transport. `attestedData` decodes to at most 2 MiB and `signature` to exactly
-the 65 bytes a notary signature is; the whole encoded body is at most 3 MiB.
+No `schema` member is carried. `attestedData` decodes to at most 2 MiB and
+`signature` to exactly 65 bytes; the whole encoded body is at most 3 MiB.
 
-The exchange reveals what proves the request belongs to the ceremony — the
-client id, the code, the redirect URI and the PKCE verifier — and commits the
-`client_secret` and the returned bearer instead of disclosing them. The secret
-is ordered last in the request body so the committed run is a suffix rather
-than a hole, which is what lets the transcript tile.
+The exchange reveals the client id, the code, the redirect URI and the PKCE
+verifier, and commits the `client_secret` and the returned bearer. The secret
+is last in the request body, so the committed range is a suffix and the
+transcript tiles.
 
-The three values are one result. The attestation without the opening proves
-nothing about the bearer, and the opening without the attestation proves
-nothing at all, so a failure returns none of them and the caller starts a fresh
-ceremony. Nothing about the request is stored: a timeout, a duplicate or a
-restart leaves nothing to resume from.
+A failure returns none of the three values, and the caller starts a fresh
+ceremony. Nothing about the request is stored.
 
-Neither X nor Google gets a confidential route. Both run browser ↔ notary, and
-a server-side X callback was proposed and rejected: X's flow is browser-only by
-design and its callback belongs on the UI origin.
+Neither X nor Google has a confidential route; both run browser ↔ notary.
 
 
 ## The CCDP Distribution
@@ -148,9 +135,8 @@ version, and holds no version list: a compatible Callback change needs no
 bridge rebuild.
 
 The policy's `script-src` carries **only hashes, computed here over the served
-bytes** — never copied from an upstream header, because a policy taken on trust
-from the document it constrains is not a constraint. The artifact bundles its
-dependencies, so no external script source appears at all.
+bytes**, never copied from an upstream header. The artifact bundles its
+dependencies, so no external script source appears.
 
 The document is composed once at startup and never varies: no request field —
 `Origin`, `Referer`, query, fragment — changes a byte of it or its policy. The
@@ -160,22 +146,18 @@ this server must redact the callback path's query string from its access
 logs** — that half of the contract is the operator's.
 
 The artifact comes from `CALLBACK_ARTIFACT_PATH`, or from the binary when that
-is unset. Both go through the same validation and the same composition — where
-the bytes came from changes what is logged and nothing else, because a supplied
-artifact is not more trusted than a compiled-in one.
+is unset. Both go through the same validation and the same composition; where
+the bytes came from changes what is logged and nothing else.
 
-The compiled-in one is a **floor**, deliberately not a working Callback: it
-clears the OAuth return, renders fixed text and completes no ceremony, and the
-process warns on every start while it is serving. It exists so the bridge always
-has a valid document — the contract's "inert unavailable response" has no
-representation here. **Set `CALLBACK_ARTIFACT_PATH` to run real ceremonies.**
-
-The bridge does not fetch the artifact itself yet; obtaining it from the
+The compiled-in one is not a working Callback: it clears the OAuth return,
+renders fixed text and completes no ceremony, and the process warns on every
+start while it is serving. **Set `CALLBACK_ARTIFACT_PATH` to run real
+ceremonies.** The bridge does not fetch the artifact; obtaining it from the
 Distribution is the deployment's job.
 
 ## What the operator has to supply
 
-Two things this server deliberately does not do for itself.
+Two things this server does not do.
 
 **Redact the callback query from proxy access logs.** The handler reads
 nothing from the request, so the authorization code never reaches this
@@ -183,11 +165,8 @@ process — but a proxy that logs request lines by default writes it to disk
 before this server sees the request at all.
 
 **Rate-limit `/api/v1/ceremony/github-token` by client.** The route caps
-concurrent exchanges at 8 and answers `503` past that, which bounds how much
-of this process one caller can hold at once. It is not rate limiting: the
-`Origin` check is not caller authentication and says so, an anonymous caller
-can retry as fast as it likes, and every accepted request spends the GitHub
-client secret against the OAuth app's standing with GitHub. A per-client
+concurrent exchanges at 8 and answers `503` past that; it does not limit by
+client, and the `Origin` check is not caller authentication. A per-client
 limit belongs in the proxy, where the client is identified.
 
 ## Configuration
@@ -218,7 +197,7 @@ control (`bridge.toml` is ignored by git).
 |---|---|---|---|
 | `host` | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `port` | `PORT` | `8722` | Bind port. |
-| `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once, and it governs the configuration route and what the callback document is told. The token route is deliberately narrower: it admits `CCDP_ORIGIN` alone, because the Prover is its only caller. |
+| `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS unless loopback. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once, and it governs the configuration route and what the callback document is told. The token route admits `CCDP_ORIGIN` alone. |
 | `callback_path` | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to; the registered OAuth callback URL is this bridge's public origin followed by it, and `/config` publishes it as `callbackPath`. There is no alias and no redirect. |
 | `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS unless loopback. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `callback_artifact_path` | `CALLBACK_ARTIFACT_PATH` | *(empty)* | A `callback.html` obtained from the CCDP Distribution, served instead of the compiled-in floor. Read once at startup and held to the same shape either way. **Unset means the floor, which completes no ceremony** — set this to run real ceremonies. |
@@ -229,17 +208,9 @@ control (`bridge.toml` is ignored by git).
 
 ### On Google
 
-Nothing here serves the Google ceremony. It gets no confidential route by
-design — its identity evidence is a signed ID Token the browser reads out of
-the redirect fragment, so there is no secret to hold and nothing to exchange.
-The fragment relay this server used to serve is gone: the redirect document
-that replaces it belongs to the ceremony's own redirect runtime, which handles
-every platform, clears the fragment, and hands the response to the code in the
-popup rather than bouncing it through a URL.
-
-Google binds also revert with `UntrustedModulus` until a JWKS rotator runs
-somewhere and publishes Google's current signing moduli on chain. This server
-is not that rotator either.
+Nothing here serves the Google ceremony: its identity evidence is a signed ID
+Token the browser reads out of the redirect fragment, so there is no secret to
+hold and nothing to exchange.
 
 ## Running with Docker
 

@@ -1,21 +1,5 @@
-//! The enabled platforms, parsed once and checked once.
-//!
-//! One record per platform, and it is the only place a platform is named. The
-//! public ceremony configuration is a projection of it, and the OAuth
-//! registrations the callback relies on are the other — "one platform
-//! configuration generates both", as the bridge contract puts it. Two lists
-//! would be two things to keep in step, and nothing would say when they
-//! stopped being in step.
-//!
-//! What is deliberately NOT here is a circuit. Proving assets belong to the
-//! CCDP Distribution, which pins its own; a bridge advertises only the
-//! platform/version pairs that distribution serves, and cannot check that
-//! itself.
-//!
-//! That is also why the GitHub client id is not a setting of its own any more.
-//! It is the `clientId` of the `github` record, and the secret beside it is the
-//! only GitHub value this service holds outside that record — because a secret
-//! is the one thing the public configuration must never carry.
+//! The enabled platforms, checked once at startup, and the public ceremony
+//! configuration projected from them.
 
 use bytes::Bytes;
 use serde::Deserialize;
@@ -30,28 +14,21 @@ use crate::error::{
     Result,
 };
 
-/// The platforms a ceremony can run against.
-///
-/// Closed as a type rather than checked against a list: serde refuses a name
-/// outside it while parsing, and names the whole catalog when it does. A
-/// `String` here would be a value every reader downstream has to take on
-/// faith, and one comparison spelled `== "github"` away from a platform that
-/// silently matches nothing.
+/// The platforms a ceremony can run against. A name outside this catalog is
+/// refused while parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlatformId {
-    /// Google, whose profile returns its routing state in the fragment.
+    /// Google.
     Google,
     /// X.
     X,
-    /// GitHub, the one platform whose token exchange is confidential and so
-    /// the one this service performs itself.
+    /// GitHub, whose token exchange this service performs.
     Github,
 }
 
 impl PlatformId {
-    /// The wire spelling, which is the key the public configuration uses and
-    /// the name an application selects by.
+    /// The wire spelling: the key in the public configuration.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Google => "google",
@@ -61,17 +38,14 @@ impl PlatformId {
     }
 }
 
-/// GitHub's token service implements ceremony version 1 and nothing else, so
-/// the configuration must not advertise another: a browser that selected one
-/// would send an exchange this service cannot answer.
+/// The one GitHub ceremony version this service's token exchange implements.
 const GITHUB_ONLY_VERSION: u16 = 1;
 
 /// One enabled platform.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PlatformProfile {
-    /// Which platform. The catalog is closed, so a name outside it is
-    /// refused while this record is parsed.
+    /// Which platform.
     pub id: PlatformId,
     /// The public OAuth client identifier. Also accepted as `client_id`.
     #[serde(alias = "client_id")]
@@ -104,7 +78,6 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
 
     for p in &profiles {
         let id = p.id.as_str();
-        // "Is there another one" rather than "how many are there".
         if profiles.iter().filter(|q| q.id == p.id).nth(1).is_some() {
             return Err(refuse(format!("{id} appears more than once")));
         }
@@ -131,25 +104,13 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
     Ok(profiles)
 }
 
-/// The public ceremony configuration, projected from the enabled set.
-///
-/// This is the projection the module doc names. The client id and the versions
-/// travel; nothing about artifacts does, because an application selects a
-/// platform and a version and never an artifact. The CCDP origin travels too:
-/// it is where the application sends the popup, and the one origin whose
-/// Callback artifact this bridge serves.
-/// What one deployment publishes, held together rather than passed apart.
-///
-/// Three readings of one deployment that every caller previously kept in step
-/// by hand, and the reason they are a struct is the same reason the record is:
-/// the projection is of a deployment, so a value that is not part of one has
-/// no field to arrive in.
+/// The public ceremony configuration: what one deployment publishes.
 pub struct CeremonyConfig<'a> {
     /// The path providers redirect back to, under the bridge's origin.
     pub callback_path: &'a str,
     /// The CCDP Distribution this deployment selects.
     pub ccdp_origin: &'a str,
-    /// The enabled platforms, already parsed and checked.
+    /// The enabled platforms, checked.
     pub platforms: &'a [PlatformProfile],
 }
 
@@ -175,11 +136,6 @@ impl CeremonyConfig<'_> {
     }
 
     /// That record as the bytes it is served in, serialized once at startup.
-    ///
-    /// Total, and not a `Result`. Serializing a `serde_json::Value` into a `Vec`
-    /// fails only on a map key that is not a string or a writer that errors, and
-    /// this has neither: the keys are `String` and the writer is memory. A
-    /// `Result` here would be an error branch no input can reach.
     pub fn serialized(&self) -> Bytes {
         Bytes::from(
             serde_json::to_vec(&self.record())
@@ -211,8 +167,7 @@ mod tests {
         assert_eq!(p[0].versions, [1]);
     }
 
-    /// Every one of these starts cleanly if unchecked, and then refuses a real
-    /// ceremony for a reason nothing in the configuration would have said.
+    /// Each of these is refused at startup.
     #[test]
     fn a_set_this_service_cannot_serve_stops_the_process() {
         for (why, json) in [

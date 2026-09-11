@@ -10,47 +10,25 @@ use libid_transcript::ceremony;
 
 use crate::oauth::OAuthCredentials;
 
-/// GitHub's token endpoint. Pinned by the platform profile, never configured:
-/// a caller-selected endpoint would let one ask this service to spend its
-/// secret against a host of the caller's choosing.
+/// GitHub's token endpoint. A constant; a caller cannot select it.
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
-/// GitHub's token session, as the generated profile table declares it.
-///
-/// The layout is built from this rather than from arguments this service
-/// chooses, and that is the point: `libid-profiles` is generated in
-/// libid-contracts from the same `profiles.json` the Platform Verifier is
-/// generated from, so what this service commits and what the verifier expects
-/// come from one file. A local restatement of any of it would be a second copy
-/// of values whose whole problem is that copies drift in silence.
-///
-/// A `const` with a `panic!` arm, so a profile table that stopped declaring a
-/// GitHub token session would fail this build rather than this route.
+/// GitHub's token session, as the generated profile table declares it; the
+/// layouts are built from it. A profile table without one fails the build.
 pub(super) const TOKEN_SESSION: ceremony::TokenSession =
     match ceremony::profiles::GITHUB.token {
         Some(session) => session,
         None => panic!("the github profile notarizes a token session"),
     };
 
-/// The body field this service commits rather than reveals.
-///
-/// Read off the profile rather than written here, and that is the point: the
-/// same table the Platform Verifier is generated from decides which field the
-/// layout commits, so the field this service ORDERS LAST and the field the
-/// notary's layout looks for cannot be two different strings. A local
-/// `"client_secret"` said the same thing until the day it did not.
+/// The body field this service commits rather than reveals, read off the
+/// profile.
 pub(super) const SECRET_FIELD: &str = match TOKEN_SESSION.secret_field {
     Some(field) => field,
     None => panic!("the github token session commits a body field"),
 };
 
-/// [`TOKEN_URL`] parsed, and the authority to send as `Host`.
-///
-/// A `const` string cannot vary, so this either always parses or never does;
-/// doing it per request turned a startup-class error into a 502 at exchange
-/// time, on a branch no test could reach. `expect` is honest here: the input
-/// is a literal in this file, and a build in which it does not parse is a
-/// build that must not start.
+/// [`TOKEN_URL`] parsed, and the authority sent as `Host`.
 static TOKEN_ENDPOINT: std::sync::LazyLock<(hyper::Uri, String)> =
     std::sync::LazyLock::new(|| {
         let uri: hyper::Uri = TOKEN_URL
@@ -64,22 +42,14 @@ static TOKEN_ENDPOINT: std::sync::LazyLock<(hyper::Uri, String)> =
         (uri, host)
     });
 
-/// Parse the token endpoint now, so a build in which it does not parse fails
-/// where the doc above says it does.
-///
-/// `LazyLock` defers to first use, and the first use is inside an exchange --
-/// which would turn a startup-class error into a panic on somebody's ceremony.
-/// `build_state` calls this.
+/// Parse the token endpoint at startup -- `build_state` calls this -- so a
+/// build in which it does not parse fails there.
 pub(crate) fn force_token_endpoint() {
     std::sync::LazyLock::force(&TOKEN_ENDPOINT);
 }
 
-/// The body of the token request, in the exact field order the profile fixes.
-///
-/// The secret is last because the disclosure layout commits a suffix: with the
-/// secret anywhere else the committed run would be a hole in the middle of the
-/// revealed body, and the verifier's coverage check refuses a transcript it
-/// cannot tile.
+/// The body of the token request, in the field order the profile fixes. The
+/// secret is last: the committed range is a suffix, and the transcript tiles.
 pub(super) fn token_request_body(
     creds: &OAuthCredentials,
     request: &TokenRequest,
@@ -94,20 +64,9 @@ pub(super) fn token_request_body(
         .finish()
 }
 
-/// The token request this service sends, as the session will transmit it.
-///
-/// `prover_generic` reads the URI's host for SNI and for the socket and writes
-/// no header of its own — a notarized request is bytes a verifier compares
-/// against a profile, so the party that knows the profile writes them. `Host`
-/// is therefore set here, and read back off the same URI rather than spelled a
-/// second time: a `Host` that disagrees with the authenticated name is exactly
-/// what the attested authority exists to catch. Omit it entirely and GitHub
-/// answers an error object, the response layout finds no `access_token` to
-/// anchor on, and the session fails somewhere that looks like a notary fault.
-///
-/// Total, and not a `Result`: the URI is a constant parsed once, the host is
-/// that URI's own authority, every header name and value is a literal, and the
-/// body is bytes, so the builder has nothing to reject.
+/// The token request this service sends, as the session transmits it. `Host`
+/// is set here, from the URI's own authority; `prover_generic` writes no
+/// header of its own.
 pub(super) fn token_http_request(
     creds: &OAuthCredentials,
     request: &TokenRequest,
@@ -121,9 +80,8 @@ pub(super) fn token_http_request(
         .header(header::HOST, host.as_str())
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .header(header::ACCEPT, "application/json")
-        // The session ends when the exchange does. Without it the connection is
-        // kept alive and the prover waits on a response that is already
-        // complete.
+        // The session ends with the exchange; without it the connection stays
+        // open.
         .header(header::CONNECTION, "close")
         .body(http_body_util::Full::new(bytes::Bytes::from(
             token_request_body(creds, request, redirect_uri),
@@ -144,9 +102,8 @@ mod tests {
         REDIRECT_URI,
     };
 
-    /// The property the whole design rests on: everything that proves this
-    /// request belongs to the ceremony is revealed, and the secret is the only
-    /// thing hidden — as a suffix, so the transcript still tiles.
+    /// Everything that proves this request belongs to the ceremony is
+    /// revealed; the secret is committed, as a suffix.
     #[test]
     fn the_secret_is_the_only_thing_the_request_hides() {
         let credentials = credentials("ghs_averyrealisticlookingclientsecret00");
@@ -183,10 +140,9 @@ mod tests {
         );
     }
 
-    /// A secret carrying `&` or `=` cannot make this service's own request
-    /// decode as more fields than it sends: the serializer percent-encodes
-    /// both, so the boundary the layout anchors on stays the one this service
-    /// wrote.
+    /// A secret carrying `&` or `=` is percent-encoded: the body has five
+    /// fields whatever the secret contains, and the committed range covers the
+    /// encoded secret whole.
     #[test]
     fn a_secret_carrying_form_delimiters_cannot_forge_a_field() {
         let secret = "sk&client_secret=forged&scope=admin";
@@ -203,10 +159,7 @@ mod tests {
             ceremony::Layout::token_request(&transcript, &TOKEN_SESSION).unwrap();
         assert_eq!(layout.reveal.len(), 1);
 
-        // Searched for as it appears ON THE WIRE. The raw bytes of a secret
-        // carrying `&` or `=` occur nowhere in a percent-encoded body, so an
-        // assertion against those would hold for any layout at all -- including
-        // one that revealed the whole transcript.
+        // The secret as it appears on the wire, percent-encoded.
         let at = body.find(SECRET_FIELD).unwrap() + SECRET_FIELD.len() + 1;
         let on_the_wire = &body.as_bytes()[at..];
         assert!(
@@ -231,9 +184,7 @@ mod tests {
         );
     }
 
-    /// `prover_generic` writes no header of its own, so the one that names the
-    /// server has to be here. Its absence is the failure that looks like
-    /// somebody else's.
+    /// `Host` names the host the session authenticates.
     #[test]
     fn the_request_names_the_host_the_session_authenticates() {
         let credentials = credentials("ghs_secret");

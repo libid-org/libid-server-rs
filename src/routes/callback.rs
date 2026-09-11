@@ -1,11 +1,6 @@
 //! The registered OAuth callback: one document, served at the configured
-//! path, identical for every request.
-//!
-//! This handler reads nothing from the request. No `Uri`, no query, no
-//! `Origin`, no `Referer` — the provider's return arrives in the query, and the
-//! strongest way to keep it out of every log and error this service could ever
-//! produce is for no code here to be able to see it. The artifact's own
-//! bundled code copies and clears it; the server never learns it existed.
+//! path, identical for every request. The handler reads nothing from the
+//! request: no URI, query, `Origin` or `Referer`.
 
 use std::sync::Arc;
 
@@ -27,10 +22,7 @@ use crate::state::AppState;
 pub(crate) async fn callback(State(state): State<Arc<AppState>>) -> Response {
     (
         [
-            // The application opened this window and must keep it through the
-            // provider's navigation. Isolating it here would sever the opener,
-            // which is the failure the whole connection layer exists to
-            // survive whenever platform policy has not already done it.
+            // `unsafe-none` keeps the opener the application holds.
             (
                 HeaderName::from_static("cross-origin-opener-policy"),
                 "unsafe-none",
@@ -40,9 +32,7 @@ pub(crate) async fn callback(State(state): State<Arc<AppState>>) -> Response {
             (header::CACHE_CONTROL, "no-store"),
             (header::REFERRER_POLICY, "no-referrer"),
         ],
-        // Set once at startup; serving it is a reference-count bump, not a
-        // parse. It rides separately because it is already a header value
-        // while the rest are static strings.
+        // Computed once at startup over the bytes served.
         [(header::CONTENT_SECURITY_POLICY, state.callback.csp.clone())],
         state.callback.body.clone(),
     )

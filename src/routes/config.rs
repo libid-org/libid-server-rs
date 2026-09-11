@@ -1,15 +1,6 @@
-//! The public ceremony configuration.
-//!
-//! Everything an application needs to start a ceremony against this
-//! deployment, and nothing else. It carries no secret, no admitted origin, no
-//! asset URL, no notary setting and nothing about a particular ceremony —
-//! which is what lets one record answer every request, and why the record is
-//! built once at startup rather than assembled per call.
-//!
-//! An application reads it once when it creates its ceremony client. The
-//! callback document never reads it: what that document needs is inserted into
-//! it before it is served, because a document that fetched its own
-//! configuration would be a document whose behaviour depends on a request.
+//! The public ceremony configuration: `{ callbackPath, ccdpOrigin, platforms }`,
+//! one record built at startup and served to every admitted origin. It carries
+//! no secret, no admitted origin, no asset URL and no notary setting.
 
 use std::sync::Arc;
 
@@ -63,9 +54,7 @@ pub(crate) async fn config(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    // Admission decides before anything else looks at the request. A caller
-    // that is not admitted learns that it is not admitted, and nothing about
-    // whether the rest of its request would have been acceptable.
+    // Admission is decided before anything else is looked at.
     let Some(origin) = admitted_origin(&state, &headers) else {
         return refuse(
             StatusCode::FORBIDDEN,
@@ -77,9 +66,8 @@ pub(crate) async fn config(
         return refuse(StatusCode::BAD_REQUEST, "this route takes no query");
     }
 
-    // A `HeaderMap`, not an array or `AppendHeaders`: the body is `Bytes` and
-    // sets its own `application/octet-stream`, so these have to REPLACE rather
-    // than append or the caller reads the first of two content types.
+    // `insert`, not append: the `Bytes` body would otherwise add its own
+    // content type.
     let mut out = HeaderMap::new();
     out.insert(header::VARY, HeaderValue::from_static(VARY_ON));
     out.insert(
@@ -91,8 +79,7 @@ pub(crate) async fn config(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    // The exact origin that asked, never `*` and never a list. No credentials
-    // are permitted with it.
+    // The exact origin that asked, never `*`; no credentials.
     out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
 
     (StatusCode::OK, out, state.ceremony_config.clone()).into_response()

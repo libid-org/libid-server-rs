@@ -23,18 +23,6 @@ use tower::ServiceExt;
 const APP_ORIGIN: &str = "http://localhost:3000";
 const CCDP_ORIGIN: &str = "https://ccdp.example";
 
-/// A deployment, built the way the binary builds one.
-///
-/// Through `build_state` and not a struct literal, so every derivation this
-/// suite then makes assertions about -- the redirect URI joined from the
-/// origin and the callback path, the client id shared by the published record
-/// and the token request, the CCDP origin reaching the document, the record and
-/// the token route's own gate -- is the one production performs. A hand-built
-/// fixture asserts the literals the fixture typed.
-///
-/// It also means no test can construct a deployment `build_state` would
-/// refuse, which is the only reason `build_router` may take an `AppState` and
-/// route a configured path without being able to fail.
 /// A loopback port nothing listens on, bound once and released: a session a
 /// test does start fails at the dial instead of reaching a notary on this
 /// machine.
@@ -46,6 +34,7 @@ fn dead_port() -> &'static str {
     })
 }
 
+/// A deployment, built the way the binary builds one, through `build_state`.
 fn deployment(overrides: &[&str]) -> Arc<AppState> {
     // Every flag that reads an environment variable is listed, so the process
     // environment reaches nothing. `--platforms` is this fixture's own: the
@@ -118,10 +107,7 @@ async fn health_answers_ok_and_carries_nosniff_like_every_other_route() {
 
 // ─── the GitHub token route ──────────────────────────────────────────────────
 //
-// Every case here is refused before a notary session is opened, which is the
-// point: a request that will not be honoured must not cost an MPC-TLS session,
-// and must not spend the client secret. That they can be driven at all without
-// a notary listening is the evidence.
+// Every case here is refused before a notary session is opened.
 
 const ORIGIN: &str = CCDP_ORIGIN;
 const VERIFIER: &str = "iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I";
@@ -139,10 +125,7 @@ async fn post_token(origin: Option<&str>, body: String) -> axum::response::Respo
 }
 
 /// A notary as a request names one: the origin the browser resolved from the
-/// ledger, on the port its own WebSocket session used. That port is not this
-/// bridge's business -- it dials the same host on the wire port, which is a
-/// convention -- and loopback is what makes this one refusable: a private
-/// destination is not dialled unless a deployment has permitted it.
+/// ledger. This bridge dials its host on the fixture's dead wire port.
 const NOTARY: &str = "https://127.0.0.1:7048";
 
 /// The registered callback URL a request carries: the fixture's callback path
@@ -150,11 +133,6 @@ const NOTARY: &str = "https://127.0.0.1:7048";
 const REDIRECT: &str = "https://bridge.example/auth/callback";
 
 /// A request body carrying every field, varying only the two under test.
-///
-/// One shape, because the tests below are a comparison: they mean something
-/// only while the body they refuse and the body they admit differ in nothing
-/// else. Built rather than written out, so a later edit cannot quietly drop a
-/// field from one of them and leave the pair asserting nothing.
 fn token_body(code: &str, verifier: &str) -> String {
     format!(
         r#"{{"code":"{code}","codeVerifier":"{verifier}","redirectUri":"{REDIRECT}","notaryAddress":"{NOTARY}"}}"#
@@ -244,18 +222,9 @@ async fn github_token_refuses_a_verifier_of_the_wrong_length() {
     );
 }
 
-/// The control the two tests above rest on, and the reason they hold a permit.
-///
-/// Both the JSON rejection and the `validate()` refusal answer `400` with the
-/// same message -- deliberately, so a caller cannot tell one from the other --
-/// so a `400` alone proves nothing about WHICH refused. These two once sent
-/// bodies with no `notaryAddress` at all: serde refused them for the missing
-/// field, and neither test ever reached the bound it is named for.
-///
-/// With no permit free, a body that gets past the bounds is answered `503` by
-/// the next gate. So this and the two above form one comparison: three bodies
-/// of one shape, differing only in the field under test, and the `400`s are the
-/// bounds because this one is not a `400`.
+/// The control for the two bounds tests above: a body that passes the bounds
+/// is answered `503` by the permit gate, so their `400`s are the bounds and
+/// not the JSON rejection, which answers `400` with the same message.
 #[tokio::test]
 async fn a_body_within_the_bounds_gets_past_them() {
     assert_eq!(
@@ -281,10 +250,8 @@ async fn answer_with_no_permit_free(body: String) -> StatusCode {
     app(state.clone()).oneshot(req).await.unwrap().status()
 }
 
-/// Each exchange is a full MPC-TLS session and an outbound request that spends
-/// the client secret, and the origin check is not caller authentication. So the
-/// ceiling is real, and a request that finds it is shed rather than queued —
-/// held requests are the same exhaustion with a longer fuse.
+/// A request that finds every exchange permit held is shed with `503`, not
+/// queued.
 #[tokio::test]
 async fn github_token_sheds_when_no_permit_is_free() {
     let req = Request::post("/api/v1/ceremony/github-token")
@@ -292,8 +259,6 @@ async fn github_token_sheds_when_no_permit_is_free() {
         .header("origin", ORIGIN)
         .body(Body::from(valid_body()))
         .unwrap();
-    // Held, not configured away: the ceiling is what production sets, and
-    // this is what a full one looks like from outside.
     let state = test_state();
     let _held = state
         .exchange_permits()
@@ -305,21 +270,14 @@ async fn github_token_sheds_when_no_permit_is_free() {
     assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
 }
 
-/// A foreign page cannot use a malformed body to tell one refusal from the
-/// other: whatever the body, the answer is the origin's.
-///
-/// The parse itself happens first regardless -- it is an extractor, and axum
-/// runs those before the handler -- which is why the route also carries a body
-/// limit rather than relying on this ordering.
+/// Whatever the body, a foreign origin is answered `403`.
 #[tokio::test]
 async fn github_token_checks_the_origin_before_the_body() {
     let resp = post_token(Some("https://evil.example"), "not json at all".into()).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// The route carries no schema member — its path already versions the
-/// transport — so one offered is an additional field like any other, and the
-/// contract refuses it rather than ignoring it.
+/// A `schema` member is an additional field, and refused.
 #[tokio::test]
 async fn github_token_refuses_a_body_carrying_a_schema() {
     let body = format!(
@@ -329,12 +287,8 @@ async fn github_token_refuses_a_body_carrying_a_schema() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// The preflight admits exactly what the handler does.
-///
-/// The two are one rule seen from two places: a layer wider than the gate
-/// advertises access this route then refuses, and one narrower lets a caller
-/// past the gate and has the browser discard the answer for want of a matching
-/// allow-origin header -- a failure with no server-side symptom at all.
+/// The preflight admits exactly what the handler does: every origin in the
+/// effective set, `POST`, `Content-Type`, no credentials.
 #[tokio::test]
 async fn the_token_preflight_admits_exactly_what_the_handler_does() {
     let preflight = |origin: &'static str| async move {
@@ -365,10 +319,7 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert!(body.is_empty(), "a preflight carries no ceremony data");
 
-    // Everything else gets no allow-origin header at all: the layer filters
-    // rather than announcing a value and leaving the refusal to the browser.
-    // An application origin is refused here and admitted on `/config`, which is
-    // the difference between the two rules.
+    // Everything else gets no allow-origin header.
     for other in [APP_ORIGIN, "https://wallet.example", "https://evil.example"] {
         let resp = preflight(other).await;
         assert!(
@@ -378,9 +329,7 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
     }
 }
 
-/// The origin gate on the POST is the CCDP origin, and specifically NOT this
-/// bridge's own: nothing on the bridge origin ever calls this route, so a
-/// request claiming to be from it is a request claiming to be from nowhere.
+/// This bridge's own origin is not the CCDP origin, so it is refused.
 #[tokio::test]
 async fn github_token_admits_the_ccdp_origin_and_not_the_bridges_own() {
     let resp = post_token(Some("http://127.0.0.1:8722"), valid_body()).await;
@@ -394,9 +343,7 @@ async fn get_config(origin: Option<&str>, query: &str) -> axum::response::Respon
     config_with(test_state(), &headers, query).await
 }
 
-/// The same route with arbitrary headers, so a test can send Fetch metadata, a
-/// `Referer`, or the same header twice -- none of which `get_config` can
-/// express, and each of which the admission rule has something to say about.
+/// The same route with arbitrary headers.
 async fn config_with(
     state: Arc<AppState>,
     headers: &[(&str, &str)],
@@ -417,9 +364,8 @@ async fn body_of(resp: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-/// An admitted application is answered with its OWN origin, never a wildcard
-/// and never the list: the record is readable by the applications this
-/// deployment admits, not by the web.
+/// An admitted application is answered with its own origin, never `*` and
+/// never the list.
 #[tokio::test]
 async fn config_answers_each_admitted_origin_with_that_exact_origin() {
     for origin in [APP_ORIGIN, "https://wallet.example"] {
@@ -435,9 +381,7 @@ async fn config_answers_each_admitted_origin_with_that_exact_origin() {
 }
 
 /// A caller that is not admitted gets no configuration and no allow-origin
-/// header — so it cannot read the record out of the refusal either. Absent and
-/// unlisted are answered the same way: which one it was is not the caller's
-/// business.
+/// header; absent and unlisted are answered alike.
 #[tokio::test]
 async fn config_refuses_an_absent_or_unlisted_origin() {
     for origin in [
@@ -489,9 +433,7 @@ async fn config_admits_nothing_on_referer_or_host() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// `Origin` decides the body, so a shared cache is told so -- on refusals as
-/// well, or a cache that ignores `no-store` could replay a 403 to an origin
-/// this deployment admits.
+/// The response varies on `Origin`, on refusals too.
 #[tokio::test]
 async fn config_varies_on_origin() {
     let admitted = config_with(test_state(), &[("origin", APP_ORIGIN)], "").await;
@@ -504,13 +446,8 @@ async fn config_varies_on_origin() {
     assert_eq!(refused.headers().get("vary").unwrap(), "origin");
 }
 
-/// The record carries exactly what the contract lists and nothing else.
-///
-/// The allowlist is absent because the contract says the record contains
-/// no such field -- not because the list is secret: the callback document
-/// carries
-/// it in a document served to anyone, and the Callback module needs it there.
-/// The secret is the field that genuinely must never appear.
+/// The record carries exactly `callbackPath`, `ccdpOrigin` and `platforms`:
+/// no secret and no allowlist.
 #[tokio::test]
 async fn config_carries_no_secret_and_no_admitted_origin() {
     let body = body_of(get_config(Some(APP_ORIGIN), "").await).await;
@@ -532,8 +469,7 @@ async fn config_carries_no_secret_and_no_admitted_origin() {
     );
 }
 
-/// The origin is decided before the query, so an unlisted caller cannot use a
-/// malformed request to tell one refusal from another.
+/// The origin is decided before the query.
 #[tokio::test]
 async fn config_refuses_a_query_but_reads_the_origin_first() {
     assert_eq!(
@@ -548,8 +484,7 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
     );
 }
 
-/// The confidential route exists only where a secret backs it. A path that
-/// answered without one would be worse than a path that is not there.
+/// The token route is mounted only where GitHub is enabled.
 #[tokio::test]
 async fn the_token_route_is_absent_when_github_is_not_enabled() {
     let state = deployment(&[
@@ -580,9 +515,8 @@ async fn get_callback(path: &str, headers: &[(&str, &str)]) -> axum::response::R
         .unwrap()
 }
 
-/// The provider brings the return in the query; the document must not vary, and
-/// no `Origin` or `Referer` may change a byte of it. One document, whatever
-/// arrives.
+/// One document, whatever arrives: no query, `Origin` or `Referer` changes a
+/// byte of it.
 #[tokio::test]
 async fn the_callback_document_is_the_same_bytes_whatever_the_request() {
     /// Status, sorted headers, body -- everything a response is.
@@ -597,11 +531,7 @@ async fn the_callback_document_is_the_same_bytes_whatever_the_request() {
             "/auth/callback",
             vec![("referer", "https://github.com/login")],
         ),
-        // Kept for the shape, not the coverage: a fragment never reaches the
-        // wire, so `Uri` drops it and this is the bare path again. What clears
-        // the fragment is the bootstrap, covered by
-        // the artifact's own bundled code, which this bridge neither writes
-        // nor inspects.
+        // A fragment never reaches the wire.
         ("/auth/callback#id_token=x&state=v1.9e1f", vec![]),
     ] {
         let resp = get_callback(path, &headers).await;
@@ -621,8 +551,8 @@ async fn the_callback_document_is_the_same_bytes_whatever_the_request() {
     assert_eq!(seen[0].0, StatusCode::OK);
 }
 
-/// The exact policy the contract lists, and the one that must not be got
-/// wrong: NOT isolated, so the application opener survives the provider.
+/// The response policy the contract lists; `cross-origin-opener-policy:
+/// unsafe-none` keeps the opener.
 #[tokio::test]
 async fn the_callback_document_carries_the_exact_response_policy() {
     let resp = get_callback("/auth/callback", &[]).await;
@@ -653,14 +583,9 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     }
     assert_eq!(directive("frame-src"), format!("frame-src {CCDP_ORIGIN}"));
     assert_eq!(directive("connect-src"), "connect-src 'none'");
-    // The package owns its styles now; there is no stylesheet hash to
-    // configure and no external stylesheet source to admit.
     assert_eq!(directive("style-src"), "style-src 'unsafe-inline'");
 
-    // DIRECTIVE-SCOPED, not a substring search over the whole policy.
-    // `'unsafe-inline'` is legitimate above, so a test that forbade the token
-    // everywhere would either fail here or get "fixed" by deleting the very
-    // token it exists to catch in `script-src`.
+    // Directive-scoped: `'unsafe-inline'` is legitimate in `style-src`.
     let script_src = directive("script-src");
     let tokens: Vec<&str> = script_src.split(' ').skip(1).collect();
     assert!(!tokens.is_empty(), "no hash in {script_src}");
@@ -670,8 +595,7 @@ async fn the_callback_document_carries_the_exact_response_policy() {
             "{token} in {script_src} is not a hash"
         );
     }
-    // No external script source at all: the artifact bundles its dependencies,
-    // so the CCDP module URL a generated shell would have imported is gone.
+    // No external script source: the artifact bundles its dependencies.
     assert!(
         !script_src.contains(CCDP_ORIGIN),
         "an external script source survived in {script_src}"
@@ -682,10 +606,7 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     assert!(html.contains("<main id=\"libid-root\"></main>"));
     assert!(!html.contains("test-client-secret"));
 
-    // One module script, and one hash naming it. That the hash is the RIGHT
-    // one is asserted where `hash_source` lives, in `artifact::tests` -- it
-    // cannot drift there, and this suite has no reason to own a copy of the
-    // digest code.
+    // One module script, and one hash naming it.
     assert_eq!(html.matches("<script type=\"module\">").count(), 1);
     assert_eq!(tokens.len(), 1, "one script, one hash: {script_src}");
 
@@ -708,8 +629,7 @@ async fn the_callback_document_admits_only_get() {
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
-/// One callback path. The paths an earlier revision of this branch served —
-/// and the alias it once had — are not routes on this bridge.
+/// One callback path; nothing else is routed.
 #[tokio::test]
 async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
     for path in [
@@ -723,9 +643,8 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
     }
 }
 
-/// The contract says the token route's query is empty, and a query on a route
-/// that carries an authorization code is exactly what a proxy access log
-/// records by default. It is refused before a permit or a session is spent.
+/// A query on the token route is refused before a permit or a session is
+/// spent.
 #[tokio::test]
 async fn github_token_refuses_a_query() {
     let req = Request::post("/api/v1/ceremony/github-token?trace=1")
@@ -737,14 +656,11 @@ async fn github_token_refuses_a_query() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// "Exactly `application/json`". The extractor alone would also admit any
-/// `application/*+json`, which is a wider door than the contract opens.
+/// Exactly `application/json`; `application/*+json` is refused.
 #[tokio::test]
 async fn github_token_takes_exactly_one_media_type() {
-    // A body the media check passes and the NEXT check refuses, so an
-    // accepted media type is proved by a `400` from validation rather than by
-    // whatever an exchange would answer -- and asserted as exactly `400`, not
-    // as "not 415", so an answer from further down cannot pass for admission.
+    // A body the media check passes and validation refuses: an accepted media
+    // type is proved by exactly `400`.
     let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort"}"#;
     for (media, admitted) in [
         ("application/json", true),
@@ -830,9 +746,7 @@ async fn github_token_refuses_an_invalid_notary_origin() {
     }
 }
 
-/// The field is required: the contract makes it part of the request, and
-/// `deny_unknown_fields` cuts both ways -- a body without it is not a
-/// `TokenRequest`.
+/// `notaryAddress` is required.
 #[tokio::test]
 async fn github_token_refuses_a_body_without_a_notary_address() {
     let body = format!(
@@ -843,15 +757,9 @@ async fn github_token_refuses_a_body_without_a_notary_address() {
 }
 
 /// One valid `Origin`, exactly the configured CCDP origin, on every request.
-///
-/// Narrower than the configuration route on purpose: the caller here is the
-/// Prover, which runs on that origin and nowhere else, so admitting an
-/// application origin would widen the one route that spends the client secret
-/// for no caller that exists.
 #[tokio::test]
 async fn github_token_admits_the_ccdp_origin_and_nothing_else() {
-    // A body the NEXT check refuses, so admission is proved without opening a
-    // notary session.
+    // A body validation refuses, so admission is proved without a session.
     let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort","notaryAddress":"https://127.0.0.1:7048"}"#;
     let post = |origins: Vec<&'static str>| async move {
         let mut req = Request::post("/api/v1/ceremony/github-token")
@@ -892,14 +800,8 @@ async fn github_token_admits_the_ccdp_origin_and_nothing_else() {
     }
 }
 
-/// The token route's CORS layer covers the token route and nothing else.
-///
-/// `Router::layer` wraps a sub-router's fallback as well as its routes, and
-/// `merge` carries that layered fallback out into the whole router. Applied
-/// that way here, every path this bridge does not serve answered a preflight
-/// advertising `POST` and handed the CCDP origin an allow-origin header on its
-/// 404 -- a route surface the contract closes, and the opposite of "unsupported
-/// methods fail without route work".
+/// The token route's CORS layer covers the token route and nothing else: an
+/// unserved path answers no preflight and carries no allow-origin header.
 #[tokio::test]
 async fn no_cors_reaches_a_path_this_bridge_does_not_serve() {
     let resp = app(test_state())
@@ -938,8 +840,7 @@ async fn no_cors_reaches_a_path_this_bridge_does_not_serve() {
     );
 }
 
-/// A body over the ceiling is told so. `400` said only "your body is wrong",
-/// which made the limit this route sets invisible to the caller it is set for.
+/// A body over the ceiling is answered `413`.
 #[tokio::test]
 async fn github_token_says_so_when_the_body_is_over_the_limit() {
     let code = "a".repeat(16 * 1024);
@@ -948,9 +849,8 @@ async fn github_token_says_so_when_the_body_is_over_the_limit() {
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
-/// "Failure returns no partial credential, attestation, or caller-selected
-/// diagnostic content", says the contract. The extractor's own rejection text
-/// quotes the caller's field names and byte offsets, so it does not travel.
+/// The extractor's rejection text, which quotes the caller's field names and
+/// byte offsets, does not travel.
 #[tokio::test]
 async fn a_refusal_body_quotes_nothing_the_caller_sent() {
     let body = format!(

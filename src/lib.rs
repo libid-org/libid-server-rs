@@ -1,20 +1,16 @@
-//! The OAuth Bridge of a libID ceremony.
+//! The OAuth Bridge of a libID ceremony. The contract is `OAUTH_BRIDGE.md` in
+//! the libid repository.
 //!
-//! Three contract routes and a liveness probe, and the contract is
-//! `OAUTH_BRIDGE.md` in the libid repository. It publishes the configuration
-//! an application starts from, serves the one callback document the OAuth
-//! platforms redirect back to, and performs the one exchange a browser cannot:
-//! GitHub's, which needs a client secret. `/health` is the fourth, outside the
-//! contract's closed surface and kept for the container healthcheck.
+//! It publishes the configuration an application starts from, serves the one
+//! callback document the OAuth platforms redirect back to, and performs the
+//! one exchange a browser cannot: GitHub's, which needs a client secret.
+//! `/health` is a liveness probe for the container healthcheck.
 //!
-//! It does not WRITE that callback document. The CCDP Distribution builds one
-//! self-contained artifact carrying every supported Callback implementation,
-//! and this service inserts its deployment data into the one slot the artifact
-//! leaves and serves the result -- so browser code, version selection and
-//! failure UI belong to the distribution, and a compatible Callback change
-//! needs no bridge rebuild. Everything the browser executes after the callback
-//! is served from that distribution too. This service verifies no proof, holds
-//! no key of its own, keeps no ceremony state, and talks to no chain.
+//! The callback document is the CCDP Distribution's artifact with this
+//! deployment's data inserted into its one slot; everything the browser runs
+//! after the callback is served by that Distribution. This service verifies
+//! no proof, holds no key of its own, keeps no ceremony state, and talks to
+//! no chain.
 
 #![warn(missing_docs)]
 
@@ -36,28 +32,17 @@ use state::AppState;
 use tokio::sync::Semaphore;
 use url::Url;
 
-/// Build the shared [`AppState`] from parsed configuration.
-///
-/// Everything that must be well-formed for a request to succeed is parsed
-/// here, so a typo fails at startup rather than on someone's ceremony.
-///
-/// It holds no key material beyond GitHub's client secret, and signs nothing:
-/// the notary signs, and this service carries what it said.
+/// Build the shared [`AppState`] from the configuration. Everything that must
+/// be well-formed for a request to succeed is checked here, at startup.
 pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let callback_path = callback_path(&cfg.callback_path)?;
 
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
-    // One effective set, derived after the CCDP origin is resolved:
-    // `allowedAppOrigins ∪ {ccdpOrigin}`. It governs configuration reads and
-    // what the callback document is told, and is built once rather than
-    // re-derived per surface.
-    //
-    // NOT the token route. That one admits `ccdpOrigin` alone -- see
-    // `GithubExchange::ccdp_origin` for why the narrower rule.
-    // Adding an already-listed origin does not duplicate it, and only the
-    // RESOLVED origin joins -- a deployment that overrides `CCDP_ORIGIN` does
-    // not keep `https://lib.id` admitted unless it lists it.
+    // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`, for the
+    // configuration route and the callback document. The resolved CCDP
+    // origin joins once; an overridden `CCDP_ORIGIN` does not keep
+    // `https://lib.id` admitted unless it is listed.
     let allowed_origins: Arc<[String]> = {
         let mut set = allowed_app_origins.clone();
         if !set.contains(&ccdp_origin) {
@@ -66,14 +51,10 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         set.into()
     };
     let platforms = deployment::platforms(cfg.platforms.clone())?;
-    // A constant that either always parses or never does, parsed here so a
-    // build in which it does not fails at startup rather than on the first
-    // ceremony that reaches it.
     routes::github_token::force_token_endpoint();
 
-    // One decision on the pair, and each arm is a whole answer: the exchange
-    // this deployment can perform, the deployment that performs none, or the
-    // two ways of naming half of one.
+    // The exchange is present exactly when a github platform and a secret are
+    // both set; one without the other refuses to start.
     let github = match (
         platforms.iter().find(|p| p.is_github()),
         cfg.gh_oauth_client_secret.as_str(),
@@ -124,22 +105,11 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     }))
 }
 
-/// Configure the callback document this deployment serves.
-///
-/// The artifact is whatever `CALLBACK_ARTIFACT_PATH` names, or the compiled-in
-/// floor when it names nothing. Both go through the same validation and the
-/// same composition: where the bytes came from changes what is logged and
-/// nothing else, because a supplied artifact is not more trusted than an
-/// embedded one -- it is read, held to the same shape, and hashed by this
-/// service either way.
-///
-/// It is read at startup rather than fetched, so the process binds without
-/// reaching the network and no request can arrive at a route with nothing to
-/// answer -- which is why the contract's "inert unavailable response" has no
-/// representation here.
 impl artifact::CallbackDocument {
-    /// The document this deployment serves: the configured artifact if one is
-    /// named, and the compiled-in floor otherwise.
+    /// The document this deployment serves: the artifact
+    /// `CALLBACK_ARTIFACT_PATH` names, or the compiled-in floor when it is
+    /// empty. Both go through the same validation and composition. Read at
+    /// startup, not fetched.
     fn for_deployment(
         cfg: &config::Config,
         ccdp_origin: &str,
@@ -171,8 +141,6 @@ impl artifact::CallbackDocument {
             },
         })?;
 
-        // Read off the composed document rather than the local, so the field the
-        // rest of the process would consult is the one this line reports.
         match document.source {
             artifact::Source::Embedded => tracing::warn!(
                 "serving the COMPILED-IN callback artifact: it clears the OAuth return \
@@ -188,17 +156,9 @@ impl artifact::CallbackDocument {
     }
 }
 
-/// Read a configured artifact, refusing one over the bound before reading it.
-///
-/// `read_to_string` alone would pull the whole file into memory and only then
-/// hand it to a scanner that refuses anything over `MAX_ARTIFACT_BYTES` -- so
-/// the bound would describe what this service is willing to SCAN while saying
-/// nothing about what it is willing to READ, and a deployment that pointed the
-/// setting at the wrong file would find that out as an allocation rather than
-/// as a message naming the setting.
-///
-/// The size is read off the handle rather than the path, so what is measured is
-/// the file that is then read.
+/// Read a configured artifact, refusing one over `MAX_ARTIFACT_BYTES` before
+/// reading it. The size is read off the open handle, and bounded again while
+/// reading.
 fn read_artifact(path: &str) -> Result<String> {
     use std::io::Read as _;
 
@@ -213,9 +173,7 @@ fn read_artifact(path: &str) -> Result<String> {
             "is {len} bytes, over the {bound}-byte bound"
         )));
     }
-    // Bounded again on the way in: `metadata` describes the file as it was a
-    // moment ago, and a growing one would otherwise be read whole. One byte
-    // over is enough to refuse -- nothing is served from a prefix.
+    // One byte over refuses; nothing is served from a prefix.
     let mut html = String::new();
     file.take(bound + 1)
         .read_to_string(&mut html)
@@ -237,11 +195,8 @@ fn allowed_app_origins(list: &str) -> Result<Vec<String>> {
     {
         let field = format!("ALLOWED_APP_ORIGINS[{i}]");
         let origin = canonical_origin(&field, spelling)?;
-        // "A duplicate or invalid member is a deployment error rather than
-        // something the bridge normalizes", says the contract of this list
-        // specifically. So a member that is not already canonical is refused
-        // here, where an operator can see which one and what it should say,
-        // rather than quietly admitted under a spelling they did not write.
+        // A member that is not already canonical is refused with the canonical
+        // spelling named, not folded.
         if origin != spelling {
             return Err(Error::Config {
                 detail: format!(
@@ -249,9 +204,7 @@ fn allowed_app_origins(list: &str) -> Result<Vec<String>> {
                 ),
             });
         }
-        // A duplicate is refused, not folded: the contract says a duplicate
-        // member is a deployment error rather than something the bridge
-        // normalizes, and a list written twice is a list nobody is reading.
+        // A duplicate is refused, not folded.
         if out.contains(&origin) {
             return Err(Error::Config {
                 detail: format!("ALLOWED_APP_ORIGINS names {origin} more than once"),
@@ -269,11 +222,10 @@ fn allowed_app_origins(list: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// The same reading for every origin this deployment configures: this
-/// service's own, the CCDP Distribution it selects, and each application
-/// origin admitted to read the configuration. One function, because these
-/// strings are compared against each other and against what a browser sends,
-/// and two spellings of the same rule are two rules.
+/// The canonical form of a configured origin: `http` or `https`, a host, no
+/// path, query, fragment or credentials; plaintext only on loopback; a host
+/// made only of the bytes an origin is made of. `Url::origin` lowercases the
+/// host and drops a default port.
 fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     let url = Url::parse(spelling).map_err(|e| Error::Config {
         detail: format!("{field} {spelling}: {e}"),
@@ -299,19 +251,13 @@ fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(refuse("carries credentials"));
     }
-    // Every origin the bridge trusts or publishes is a code-supply boundary,
-    // and a plaintext one is no boundary. Loopback is the stated exception,
-    // for development against a local server.
+    // Plaintext only on loopback.
     if url.scheme() == "http" && !is_loopback(&url) {
         return Err(refuse("is plaintext http on a host that is not loopback"));
     }
-    // `Url` admits bytes in a host that no browser would ever send and that a
-    // Content-Security-Policy reads as syntax: `;` there starts a new
-    // directive, and CSP honours the FIRST occurrence of each. The CCDP origin
-    // is spliced unescaped into `script-src` and `frame-src`, so
-    // `https://a;b.example` silently truncates `frame-src` and the document
-    // can frame nothing. Closed to what an origin is actually made of, because
-    // a policy is not a place to discover that a setting had syntax in it.
+    // `;`, quotes and other bytes a Content-Security-Policy reads as syntax
+    // are refused: the CCDP origin is spliced into `script-src` and
+    // `frame-src`.
     let origin = url.origin().ascii_serialization();
     if !origin
         .bytes()
@@ -334,12 +280,10 @@ fn is_loopback(url: &Url) -> bool {
     }
 }
 
-/// The path the providers redirect back to, and the only configurable route.
-///
-/// A spelling axum reads as a pattern -- anything with braces in it -- would
-/// quietly turn one document into a wildcard. A path colliding with a fixed
-/// route is worse: `Router::route` panics, and a deployment learns that by not
-/// starting, with no line saying which setting did it.
+/// The path the providers redirect back to: begins with `/` and not `//`; no
+/// braces and no segment beginning with `:` or `*`; no query, fragment,
+/// whitespace, control byte or byte a browser would percent-encode; and not a
+/// fixed route.
 fn callback_path(path: &str) -> Result<String> {
     let refuse = |why: &str| Error::Config {
         detail: format!("CALLBACK_PATH {path} {why}"),
@@ -347,21 +291,14 @@ fn callback_path(path: &str) -> Result<String> {
     if !path.starts_with('/') {
         return Err(refuse("does not begin with `/`"));
     }
-    // `//x.example/cb` is a valid route to axum and a SCHEME-RELATIVE URL to a
-    // browser: `history.replaceState(null, '', location.pathname)` then
-    // resolves it cross-origin and throws, so the bootstrap dies before it
-    // clears -- the authorization code stays in the address bar and in
-    // history, nothing renders, and no server-side symptom exists at all.
+    // A browser reads `//host/...` as scheme-relative.
     if path.starts_with("//") {
         return Err(refuse(
             "begins with `//`, which a browser reads as scheme-relative, so \
              the document could not clear the return out of its own URL",
         ));
     }
-    // Three spellings of the same mistake, and axum rejects all three at
-    // `Router::route` -- with a panic naming neither the setting nor the path.
-    // Braces are its current syntax; a segment opening with `:` or `*` is the
-    // syntax it carried before, still refused rather than routed.
+    // axum path-pattern syntax, current and former.
     if path.contains(['{', '}'])
         || path
             .split('/')
@@ -379,9 +316,7 @@ fn callback_path(path: &str) -> Result<String> {
             "carries a query, fragment, whitespace or control byte",
         ));
     }
-    // A byte a browser percent-encodes is a byte axum never sees: it matches on
-    // the raw path, so `/auth/cällback` registers one route and receives
-    // requests for another. The service would start and refuse every ceremony.
+    // axum matches the raw path; a browser sends these percent-encoded.
     if !path.is_ascii() || path.chars().any(|c| "%\"<>\\^`|".contains(c)) {
         return Err(refuse(
             "carries a byte a browser would percent-encode, so the route it \
@@ -398,12 +333,6 @@ fn callback_path(path: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    /// A deployment that starts, with `args` replacing any default it names.
-    ///
-    /// Every flag that reads an environment variable is listed, so the
-    /// process environment reaches nothing. `--platforms` is this fixture's
-    /// own: the JSON records go to `Config::platforms`, which the binary
-    /// fills from the configuration file.
     /// A loopback port nothing listens on, bound once and released: a session
     /// a test does start fails at the dial instead of reaching a notary on
     /// this machine.
@@ -415,6 +344,12 @@ mod tests {
         })
     }
 
+    /// A deployment that starts, with `args` replacing any default it names.
+    ///
+    /// Every flag that reads an environment variable is listed, so the
+    /// process environment reaches nothing. `--platforms` is this fixture's
+    /// own: the JSON records go to `Config::platforms`, which the binary
+    /// fills from the configuration file.
     fn config(args: &[&str]) -> config::Config {
         let mut flags: Vec<(&str, &str)> = vec![
             ("--host", "127.0.0.1"),
@@ -454,15 +389,11 @@ mod tests {
         cfg
     }
 
-    /// An omitted CCDP origin selects the canonical libID Distribution.
-    ///
-    /// Asserted in two halves, and deliberately not by parsing an argv without
-    /// the flag: clap prefers an environment variable over a declared default,
-    /// so that spelling would pass or fail depending on whether the developer
-    /// running it happens to export `CCDP_ORIGIN`.
+    /// An omitted CCDP origin selects the canonical libID Distribution: the
+    /// declared default is `https://lib.id`, and the configured value reaches
+    /// the published record.
     #[test]
     fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
-        // What the deployment contract declares, read off the command itself.
         let command = <config::Config as clap::CommandFactory>::command();
         let arg = command
             .get_arguments()
@@ -470,18 +401,14 @@ mod tests {
             .expect("the ccdp origin is an argument");
         assert_eq!(arg.get_default_values(), ["https://lib.id"]);
 
-        // And that whatever it is reaches the record an application reads --
-        // the plumbing, which is the half a default alone would not prove.
         let state = build_state(&config(&["--ccdp-origin", "https://lib.id"])).unwrap();
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(record["ccdpOrigin"], "https://lib.id");
     }
 
-    /// The plaintext exception is loopback and only loopback, in each of the
-    /// three spellings a host can take. A deployment reaching a development
-    /// server over `http` is why the exception exists; one reaching anything
-    /// else over `http` has an unauthenticated code-supply boundary.
+    /// Plaintext `http` is admitted on loopback, in each spelling a host can
+    /// take, and refused everywhere else.
     #[test]
     fn plaintext_is_admitted_for_loopback_and_refused_everywhere_else() {
         for spelling in [
@@ -500,28 +427,24 @@ mod tests {
         }
     }
 
-    /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`, derived after
-    /// the CCDP origin resolves -- so an omitted origin joins the default, an
-    /// overridden one joins only the replacement, and listing it twice does
-    /// not duplicate it.
+    /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the default
+    /// joins, an override joins in its place, and an origin already listed is
+    /// not added twice.
     #[test]
     fn the_effective_admission_set_is_the_allowlist_plus_the_ccdp_origin() {
         let origins = |args: &[&str]| -> Vec<String> {
             build_state(&config(args)).unwrap().allowed_origins.to_vec()
         };
 
-        // The default joins.
         assert_eq!(
             origins(&["--ccdp-origin", "https://lib.id"]),
             ["https://app.example", "https://lib.id"]
         );
 
-        // An override joins instead -- `lib.id` is not kept.
         let overridden = origins(&["--ccdp-origin", "https://ccdp.example"]);
         assert_eq!(overridden, ["https://app.example", "https://ccdp.example"]);
         assert!(!overridden.iter().any(|o| o == "https://lib.id"));
 
-        // Already listed, and it is not added twice.
         assert_eq!(
             origins(&[
                 "--allowed-app-origins",
@@ -533,15 +456,8 @@ mod tests {
         );
     }
 
-    /// An underscore is legal in a host, is a byte a browser sends unchanged,
-    /// and is not Content-Security-Policy syntax -- so the byte filter that
-    /// exists to keep CSP delimiters out must not take it with them.
-    /// The bound is on what this service READS, not only on what it scans.
-    ///
-    /// `MAX_ARTIFACT_BYTES` guards the scanner, and the artifact is a file a
-    /// deployment names -- so a setting pointed at the wrong file used to be
-    /// pulled into memory whole and refused afterwards, which is a message
-    /// about a setting arriving as an allocation.
+    /// A configured artifact over `MAX_ARTIFACT_BYTES` is refused, naming the
+    /// setting, before it is read; one within the bound is read and composed.
     #[test]
     fn an_artifact_file_over_the_bound_is_refused_before_it_is_read() {
         let dir = std::env::temp_dir().join(format!(
@@ -564,8 +480,6 @@ mod tests {
         assert!(detail.contains("bound"), "{detail}");
         assert!(detail.contains("CALLBACK_ARTIFACT_PATH"), "{detail}");
 
-        // And a file within it is read and composed, so the bound is a bound
-        // and not a refusal of every configured artifact.
         let fine = dir.join("fine.html");
         std::fs::write(&fine, artifact::EMBEDDED).unwrap();
         let state = build_state(&config(&[
@@ -578,6 +492,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// An underscore in a host is admitted; the bytes a Content-Security-Policy
+    /// reads as syntax are refused.
     #[test]
     fn an_underscore_in_a_host_is_an_origin_like_any_other() {
         for spelling in [
@@ -586,14 +502,12 @@ mod tests {
         ] {
             assert!(canonical_origin("T", spelling).is_ok(), "{spelling}");
         }
-        // And the bytes it exists for are still refused.
         for hostile in ["https://a;b.example", "https://a'b.example"] {
             assert!(canonical_origin("T", hostile).is_err(), "{hostile}");
         }
     }
 
-    /// Every one of these starts a process that then refuses real ceremonies,
-    /// which is the whole reason these run at startup rather than per request.
+    /// Each of these is refused at startup.
     #[test]
     fn a_deployment_that_could_not_serve_a_ceremony_stops_the_process() {
         for (why, args) in [
@@ -617,9 +531,6 @@ mod tests {
                 "a callback path axum reads as a brace pattern",
                 vec!["--callback-path", "/auth/{rest}"],
             ),
-            // axum panics on both of these at `Router::route`, after
-            // `build_state` has already returned -- so the deployment learns
-            // by not starting, with nothing saying which setting did it.
             (
                 "a callback path with a colon segment",
                 vec!["--callback-path", "/auth/:cb"],
@@ -636,18 +547,10 @@ mod tests {
                 "a callback path colliding with a fixed route",
                 vec!["--callback-path", "/api/v1/ceremony/config"],
             ),
-            // Routed by axum, read as scheme-relative by a browser: the
-            // bootstrap's `history.replaceState` throws cross-origin before it
-            // clears, so the authorization code stays in the address bar and
-            // nothing on this side ever hears about it.
             (
                 "a scheme-relative callback path",
                 vec!["--callback-path", "//evil.example/cb"],
             ),
-            // `Url` keeps these in a host; a Content-Security-Policy reads the
-            // first as a directive separator. Every configured origin is held
-            // to the same shape, because all three reach a policy or a
-            // comparison with what a browser sent.
             (
                 "a CCDP origin whose host carries a CSP directive separator",
                 vec!["--ccdp-origin", "https://a;b.example"],
@@ -656,9 +559,6 @@ mod tests {
                 "an admitted origin whose host carries a CSP keyword quote",
                 vec!["--allowed-app-origins", "https://a'b.example"],
             ),
-            // "A duplicate or invalid member is a deployment error rather than
-            // something the bridge normalizes": each is refused with the
-            // canonical spelling named, where `CCDP_ORIGIN` would be folded.
             (
                 "an admitted origin carrying a trailing slash",
                 vec!["--allowed-app-origins", "https://app.example/"],
@@ -679,9 +579,8 @@ mod tests {
         }
     }
 
-    /// The whole catalog, in the configuration an application reads. Every
-    /// platform is keyed by the name it is selected by, and the record carries
-    /// the public client id and versions and nothing else.
+    /// The published record keys every enabled platform by name and carries
+    /// its client id and versions, and no secret.
     #[test]
     fn the_published_configuration_keys_every_enabled_platform_by_name() {
         let state = build_state(&config(&[
@@ -700,13 +599,11 @@ mod tests {
             serde_json::json!([1, 2])
         );
         assert_eq!(platforms["x"]["clientId"], "xc");
-        // The secret is the one thing the public record must never carry.
         assert!(!String::from_utf8_lossy(&state.ceremony_config).contains("ghs_secret"));
     }
 
-    /// The secret and the platform that spends it travel together, or neither
-    /// is any use: a route mounted with no secret answers where it should not
-    /// exist, and a secret nothing can spend is a target with no purpose.
+    /// A github platform without a secret, or a secret without a github
+    /// platform, refuses to start; neither is a deployment without the route.
     #[test]
     fn the_github_secret_and_the_github_platform_require_each_other() {
         let no_secret = vec!["--gh-oauth-client-secret", ""];
@@ -731,14 +628,8 @@ mod tests {
         assert!(state.github.is_none());
     }
 
-    /// Every path this router mounts, actually mounted -- for the deployment
-    /// that carries the token route and the one that does not.
-    ///
-    /// It does NOT exercise a collision: `callback_path` refuses one before
-    /// `build_router` is reached, and that refusal is covered in the startup
-    /// table above. What this catches is a path `build_router` mounts that
-    /// `FIXED_PATHS` does not name, which `Router::route` answers with a panic
-    /// the moment a deployment configures the callback there.
+    /// `build_router` mounts every path for a deployment with the token route
+    /// and one without.
     #[test]
     fn building_the_router_for_a_configured_deployment_does_not_panic() {
         let state = build_state(&config(&[])).unwrap();
