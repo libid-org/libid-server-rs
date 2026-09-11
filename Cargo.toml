@@ -84,6 +84,8 @@ url = "2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Paused time, for the tests that wait out a budget.
+tokio = { version = "1", features = ["test-util"] }
 
 # ── TLSNotary fork ──────────────────────────────────────────────────────
 # Copied VERBATIM from the notary's Cargo.toml, and it has to stay that way:
