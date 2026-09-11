@@ -236,6 +236,51 @@ cargo build --release          # rustc >= 1.95 (see rust-version in Cargo.toml)
 cargo test
 ```
 
+## Testing
+
+`cargo test` is hermetic: it opens no socket outside the process and needs no
+credentials.
+
+The token route's last gate, an MPC-TLS session through a notary to
+`github.com`, is covered by a second suite behind a feature:
+
+```sh
+cargo test --features live-ceremony --test ceremony
+```
+
+The notary is in-process, built from the same `libid-tlsn` this service
+uses. The suite reads its settings from the environment, or from a gitignored
+`.env.test` where an exported variable wins; a missing variable fails the run.
+
+| Variable | Rungs | Meaning |
+|---|---|---|
+| `GH_OAUTH_CLIENT_ID`, `GH_OAUTH_CLIENT_SECRET` | all | The OAuth App the sessions authenticate as. |
+| `LIBID_TEST_REDIRECT_URI` | all | The App's registered callback URL; its path becomes the deployment's callback path. |
+| `GH_TEST_ALICE_USERNAME`, `GH_TEST_ALICE_PASSWORD` | success | The test account. |
+| `GH_TEST_ALICE_TOTP_SECRET` | success, optional | The base32 key of the account's authenticator app, when it has one; the browser answers the TOTP prompt with it. |
+| `GH_TEST_ALICE_COOKIES` | success, optional | The account's session, as the export test prints it. With it the browser is signed in already; without it, it signs in with the form. |
+| `BROWSER_HEAD=1` | success | A visible Chrome. |
+| `CHROME` | success | The Chrome binary, when it is not on the `PATH`. |
+
+Three rungs need no account: a refused code (`400`), refused credentials
+(`502`), and a notary that never speaks (`502` after the 120-second session
+budget). The fourth signs in as the test account in Chrome, authorizes the
+App, and checks the bearer, the attestation and its signature. A run that
+stops on a page it does not handle prints that page's URL and text.
+
+To export the account's session for `GH_TEST_ALICE_COOKIES`:
+
+```sh
+BROWSER_HEAD=1 cargo test --features live-ceremony --test ceremony -- --ignored --nocapture a_fresh_session
+```
+
+A visible Chrome signs in; a device-verification prompt is completed by hand
+there, once. Headless, that prompt fails the run.
+
+In CI (`ceremony.yml`) pull requests run the two refusal rungs; the scheduled
+and dispatched runs run every rung, one at a time. The job is skipped where
+the secrets are absent.
+
 ## License
 
 Dual-licensed under MIT and Apache-2.0 — see `LICENSE-MIT`,

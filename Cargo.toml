@@ -12,6 +12,12 @@ publish = false
 [dependencies]
 # A fixture Distribution answering with a chunked body.
 futures-util = { version = "0.3", optional = true }
+# The live ceremony suite: Chrome over CDP, a TOTP code, and `.env.test`.
+chromiumoxide = { version = "0.7", default-features = false, features = [
+    "tokio-runtime",
+], optional = true }
+totp-rs = { version = "5", optional = true }
+dotenvy = { version = "0.15", optional = true }
 # ── libid-rs shared crates ──────────────────────────────────────────────
 # Three crates, one source, one revision. Two of them are also on crates.io,
 # but libid-tlsn is git-only (its upstream `tlsn` dep is not on crates.io) and
@@ -44,6 +50,8 @@ futures-util = { version = "0.3", optional = true }
 libid-ceremony = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0" }
 libid-tlsn = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0" }
 libid-transcript = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0" }
+# The live ceremony suite's notary key; the same rev as the three rows above.
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "501f094bf10f776c2227ef345908f507a0c80fd0", optional = true }
 # Upstream TLSNotary is NOT a direct dependency. Everything this service reads
 # off a session — `CommitmentOpening` and the `Direction` it carries — comes
 # re-exported from libid-tlsn. What libid-tlsn pins is then overridden by the
@@ -101,6 +109,19 @@ url = "2"
 [features]
 # The test fixtures (`libid_server_rs::fixtures`), for the integration tests.
 fixtures = ["dep:futures-util"]
+# The live ceremony suite (`tests/ceremony`): real sessions against github.com
+# through an in-process notary, and a browser for the success rung.
+live-ceremony = [
+    "fixtures",
+    "dep:chromiumoxide",
+    "dep:totp-rs",
+    "dep:dotenvy",
+    "dep:libid-crypto",
+]
+
+[[test]]
+name = "ceremony"
+required-features = ["live-ceremony"]
 
 [dev-dependencies]
 libid-server-rs = { path = ".", features = ["fixtures"] }

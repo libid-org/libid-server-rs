@@ -1,110 +1,122 @@
-//! The binary: it starts on a configuration file, answers, and stops on
-//! SIGINT; a configuration it cannot serve stops it before it binds.
+//! The binary over TCP: it starts on a configuration file, answers every
+//! route, stops on SIGINT; a configuration it cannot serve stops it before it
+//! binds.
 
-use std::{
-    io::{
-        BufRead,
-        BufReader,
-        Read,
-        Write,
+#[path = "common/bridge.rs"]
+// Each suite uses its part of the module.
+#[allow(dead_code)]
+mod bridge;
+
+use bridge::{
+    Bridge,
+    Reply,
+};
+use libid_server_rs::{
+    fixtures::{
+        self,
+        token_body_with,
+        Distribution,
     },
-    process::{
-        Command,
-        Stdio,
+    routes::{
+        CONFIG_PATH,
+        TOKEN_PATH,
     },
 };
 
-use libid_server_rs::fixtures::{
-    self,
-    Distribution,
-};
-
-/// A configuration file for the binary, pointed at the shared Distribution
-/// and a wire port nothing listens on.
-fn config_file(platforms: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "libid-startup-{}-{:?}.toml",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::write(
-        &path,
-        format!(
-            "host = \"127.0.0.1\"\nport = 0\nnotary_wire_port = {}\n\
-             allowed_app_origins = [\"https://app.example\"]\n\
-             ccdp_origin = \"{}\"\n{platforms}",
-            fixtures::dead_port(),
-            Distribution::shared().origin(),
-        ),
+/// A configuration pointed at the shared Distribution and a wire port
+/// nothing listens on, with `platforms` appended.
+fn config(platforms: &str) -> String {
+    format!(
+        "host = \"127.0.0.1\"\nport = 0\nnotary_wire_port = {}\n\
+         allowed_app_origins = [\"https://app.example\"]\n\
+         ccdp_origin = \"{}\"\n{platforms}",
+        fixtures::dead_port(),
+        Distribution::shared().origin(),
     )
-    .expect("a scratch configuration file");
-    path
 }
 
-/// The binary, started on `config` with the secret in its environment and its
-/// output captured.
-fn binary(config: &std::path::Path) -> std::process::Child {
-    Command::new(env!("CARGO_BIN_EXE_libid-server-rs"))
-        .env_clear()
-        // The coverage profile path, when this test runs under one.
-        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
-        .env("LIBID_CONFIG", config)
-        .env("GH_OAUTH_CLIENT_SECRET", fixtures::CLIENT_SECRET)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the binary starts")
-}
-
-/// The binary binds, answers `/health`, and exits `0` on SIGINT.
+/// The binary binds, answers every route as the router does, and exits `0`
+/// on SIGINT.
 #[test]
-fn the_binary_serves_until_interrupted() {
-    let config = config_file(&format!(
-        "[[platforms]]\nid = \"github\"\nclient_id = \"{}\"\nversions = [1]\n",
-        fixtures::CLIENT_ID
-    ));
-    let mut child = binary(&config);
-
-    // The address is the one thing the binary says before it serves.
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let address = loop {
-        let mut line = String::new();
-        assert!(
-            stdout.read_line(&mut line).unwrap() > 0,
-            "the binary exited before binding"
-        );
-        if let Some(rest) = line.split("listening on ").nth(1) {
-            break rest.trim().to_owned();
-        }
+fn the_binary_serves_every_route_until_interrupted() {
+    let bridge = Bridge::started(
+        &config(&format!(
+            "[[platforms]]\nid = \"github\"\nclient_id = \"{}\"\nversions = [1]\n",
+            fixtures::CLIENT_ID
+        )),
+        &[("GH_OAUTH_CLIENT_SECRET", fixtures::CLIENT_SECRET)],
+    );
+    let get = |path: &str, headers: &[(&str, &str)]| {
+        Reply::to(bridge.address, "GET", path, headers, "")
     };
 
-    let mut socket = std::net::TcpStream::connect(&address).unwrap();
-    socket
-        .write_all(b"GET /health HTTP/1.1\r\nhost: bridge\r\nconnection: close\r\n\r\n")
-        .unwrap();
-    let mut answer = String::new();
-    socket.read_to_string(&mut answer).unwrap();
-    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    let health = get("/health", &[]);
+    assert_eq!(health.status, 200, "{}", health.body);
+    assert_eq!(health.body, "OK");
+    assert_eq!(health.header("x-content-type-options"), Some("nosniff"));
 
-    let interrupted = Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(interrupted.success());
-    let exit = child.wait().unwrap();
+    let admitted = get(CONFIG_PATH, &[("origin", "https://app.example")]);
+    assert_eq!(admitted.status, 200, "{}", admitted.body);
+    assert_eq!(
+        admitted.header("access-control-allow-origin"),
+        Some("https://app.example")
+    );
+    let record: serde_json::Value =
+        serde_json::from_str(&admitted.body).expect("a JSON record");
+    assert_eq!(record["callbackPath"], "/auth/callback");
+    assert_eq!(record["ccdpOrigin"], Distribution::shared().origin());
+    assert_eq!(
+        record["platforms"]["github"]["clientId"],
+        fixtures::CLIENT_ID
+    );
+
+    let anonymous = get(CONFIG_PATH, &[]);
+    assert_eq!(anonymous.status, 403, "{}", anonymous.body);
+    assert_eq!(anonymous.header("access-control-allow-origin"), None);
+
+    let callback = get("/auth/callback?code=abc&state=v1.9e1f", &[]);
+    assert_eq!(callback.status, 200, "{}", callback.body);
+    assert_eq!(
+        callback.header("content-type"),
+        Some("text/html; charset=utf-8")
+    );
+    let policy = callback
+        .header("content-security-policy")
+        .expect("the callback carries its policy");
+    assert!(policy.contains("script-src 'sha256-"), "{policy}");
+    assert!(
+        policy.contains(&format!("frame-src {}", Distribution::shared().origin())),
+        "{policy}"
+    );
+    assert!(callback.body.contains("<main id=\"libid-root\"></main>"));
+    assert!(!callback.body.contains("__LIBID_CALLBACK_CONFIG__"));
+
+    let foreign = Reply::to(
+        bridge.address,
+        "POST",
+        TOKEN_PATH,
+        &[
+            ("origin", "https://evil.example"),
+            ("content-type", "application/json"),
+        ],
+        &token_body_with(&[]),
+    );
+    assert_eq!(foreign.status, 403, "{}", foreign.body);
+    assert_eq!(foreign.header("cache-control"), Some("no-store"));
+
+    let (exit, printed) = bridge.interrupted();
     assert!(exit.success(), "{exit}");
-    let mut rest = String::new();
-    stdout.read_to_string(&mut rest).unwrap();
-    assert!(rest.contains("shutting down"), "{rest}");
+    assert!(printed.contains("shutting down"), "{printed}");
 }
 
 /// A configuration enabling no platform stops the binary before it binds,
 /// with the missing table named.
 #[test]
 fn a_configuration_the_binary_cannot_serve_stops_it() {
-    let config = config_file("");
-    let output = binary(&config).wait_with_output().unwrap();
+    let output = bridge::attempt(
+        &config(""),
+        &[("GH_OAUTH_CLIENT_SECRET", fixtures::CLIENT_SECRET)],
+    );
     assert!(!output.status.success(), "{}", output.status);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("[[platforms]]"), "{stderr}");

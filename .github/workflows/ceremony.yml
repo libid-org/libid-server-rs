@@ -1,0 +1,93 @@
+name: Live ceremony
+
+# The suite behind `--features live-ceremony`: real MPC-TLS sessions through
+# an in-process notary against github.com. Pull requests run the two refusal
+# rungs; the scheduled and dispatched runs add the session-budget rung and
+# the browser success rung. Not a required check.
+
+on:
+  pull_request:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ceremony-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: "-D warnings"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_VERSION: 1.97.1
+
+jobs:
+  # Whether the App's secret is available to this run: it is not on a pull
+  # request from a fork, and not in a repository without the secrets.
+  gate:
+    name: Secrets available
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+    steps:
+      - id: check
+        env:
+          SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+        run: |
+          if [ -n "$SECRET" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else echo "go=false" >> "$GITHUB_OUTPUT"; fi
+
+  refusals:
+    name: Refusal rungs
+    needs: gate
+    if: needs.gate.outputs.go == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: live-ceremony
+
+      - name: Refused code, refused credentials
+        env:
+          GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
+          GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+          LIBID_TEST_REDIRECT_URI: ${{ vars.LIBID_TEST_REDIRECT_URI }}
+        run: |
+          cargo test --features live-ceremony --test ceremony -- --test-threads=1 --skip never_speaks --skip a_real_authorization
+
+  full:
+    name: Every rung
+    needs: gate
+    if: needs.gate.outputs.go == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: live-ceremony
+
+      - name: Every rung, one at a time
+        env:
+          GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
+          GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+          LIBID_TEST_REDIRECT_URI: ${{ vars.LIBID_TEST_REDIRECT_URI }}
+          GH_TEST_ALICE_USERNAME: ${{ secrets.GH_TEST_ALICE_USERNAME }}
+          GH_TEST_ALICE_PASSWORD: ${{ secrets.GH_TEST_ALICE_PASSWORD }}
+          GH_TEST_ALICE_TOTP_SECRET: ${{ secrets.GH_TEST_ALICE_TOTP_SECRET }}
+          GH_TEST_ALICE_COOKIES: ${{ secrets.GH_TEST_ALICE_COOKIES }}
+          CHROME: /usr/bin/google-chrome
+        run: |
+          cargo test --features live-ceremony --test ceremony -- --test-threads=1
