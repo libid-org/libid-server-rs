@@ -311,9 +311,7 @@ fn b64(bytes: &[u8]) -> String {
 /// `callback_path`, with no query, fragment or credentials.
 fn redirect_uri<'a>(spelling: &'a str, callback_path: &str) -> Option<&'a str> {
     let url = url::Url::parse(spelling).ok()?;
-    let plaintext_loopback = url.scheme() == "http"
-        && matches!(url.host_str(), Some("localhost" | "127.0.0.1"));
-    if !(url.scheme() == "https" || plaintext_loopback)
+    if !(url.scheme() == "https" || crate::is_plaintext_loopback(&url))
         || url.query().is_some()
         || url.fragment().is_some()
         || !url.username().is_empty()

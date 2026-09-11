@@ -67,7 +67,11 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                 },
                 callback_path: callback_path.clone(),
                 egress: routes::github_token::NotaryEgress::new(cfg.notary_wire_port),
-                ccdp_origin: ccdp_origin.clone(),
+                ccdp_origin: axum::http::HeaderValue::from_str(&ccdp_origin).map_err(
+                    |e| Error::Config {
+                        detail: format!("CCDP_ORIGIN {ccdp_origin}: {e}"),
+                    },
+                )?,
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
         }
@@ -236,9 +240,9 @@ fn allowed_app_origins(list: &[String]) -> Result<Vec<String>> {
 }
 
 /// The canonical form of a configured origin: `http` or `https`, a host, no
-/// path, query, fragment or credentials; plaintext only on loopback; a host
-/// made only of the bytes an origin is made of. `Url::origin` lowercases the
-/// host and drops a default port.
+/// path, query, fragment or credentials; plaintext only on `localhost` or
+/// `127.0.0.1`; a host made only of the bytes an origin is made of.
+/// `Url::origin` lowercases the host and drops a default port.
 fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     let url = Url::parse(spelling).map_err(|e| Error::Config {
         detail: format!("{field} {spelling}: {e}"),
@@ -264,9 +268,10 @@ fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(refuse("carries credentials"));
     }
-    // Plaintext only on loopback.
-    if url.scheme() == "http" && !is_loopback(&url) {
-        return Err(refuse("is plaintext http on a host that is not loopback"));
+    if url.scheme() == "http" && !is_plaintext_loopback(&url) {
+        return Err(refuse(
+            "is plaintext http on a host that is not localhost or 127.0.0.1",
+        ));
     }
     // `;`, quotes and other bytes a Content-Security-Policy reads as syntax
     // are refused: the CCDP origin is spliced into `script-src` and
@@ -284,13 +289,10 @@ fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
     Ok(origin)
 }
 
-fn is_loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        None => false,
-    }
+/// Whether `url` is plaintext `http` on exactly `localhost` or `127.0.0.1`:
+/// the one case a canonical origin is not HTTPS.
+pub(crate) fn is_plaintext_loopback(url: &Url) -> bool {
+    url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
 }
 
 /// The path the providers redirect back to: begins with `/` and not `//`; no
@@ -420,18 +422,16 @@ mod tests {
         assert_eq!(record["ccdpOrigin"], "https://lib.id");
     }
 
-    /// Plaintext `http` is admitted on loopback, in each spelling a host can
-    /// take, and refused everywhere else.
+    /// Plaintext `http` is admitted on exactly `localhost` and `127.0.0.1`,
+    /// and refused everywhere else.
     #[test]
     fn plaintext_is_admitted_for_loopback_and_refused_everywhere_else() {
-        for spelling in [
-            "http://127.0.0.1:8722",
-            "http://[::1]:8722",
-            "http://localhost:3000",
-        ] {
+        for spelling in ["http://127.0.0.1:8722", "http://localhost:3000"] {
             assert!(canonical_origin("T", spelling).is_ok(), "{spelling}");
         }
         for spelling in [
+            "http://[::1]:8722",
+            "http://127.0.0.2:8722",
             "http://10.0.0.1",
             "http://192.168.1.1:8722",
             "http://app.example",
@@ -533,7 +533,7 @@ mod tests {
                 ],
             ),
             (
-                "a plaintext admitted origin that is not loopback",
+                "a plaintext admitted origin that is not localhost or 127.0.0.1",
                 vec!["--allowed-app-origins", "http://app.example"],
             ),
             (

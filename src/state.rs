@@ -29,8 +29,8 @@ pub struct GithubExchange {
     /// private and internal addresses.
     pub(crate) egress: crate::routes::github_token::NotaryEgress,
     /// The CCDP Distribution this bridge selects: the only origin the token
-    /// route admits.
-    pub(crate) ccdp_origin: String,
+    /// route admits, as the `Origin` header value it is compared with.
+    pub(crate) ccdp_origin: axum::http::HeaderValue,
     /// The exchange permits, [`MAX_CONCURRENT_EXCHANGES`] of them. A request
     /// that finds none is shed, not queued.
     pub(crate) permits: Semaphore,

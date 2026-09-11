@@ -108,14 +108,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
 /// The token route's CORS layer: the CCDP origin as a one-member list, so a
 /// caller from any other origin gets no allow-origin header; `POST`,
-/// `Content-Type`, no credentials. A malformed configured origin yields an
-/// empty list, which admits nobody.
-fn token_cors(ccdp_origin: &str) -> CorsLayer {
-    let origin = HeaderValue::from_str(ccdp_origin)
-        .map(|v| AllowOrigin::list([v]))
-        .unwrap_or_else(|_| AllowOrigin::list([]));
+/// `Content-Type`, no credentials.
+fn token_cors(ccdp_origin: &HeaderValue) -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(origin)
+        .allow_origin(AllowOrigin::list([ccdp_origin.clone()]))
         .allow_methods([axum::http::Method::POST])
         .allow_headers([axum::http::header::CONTENT_TYPE])
 }
