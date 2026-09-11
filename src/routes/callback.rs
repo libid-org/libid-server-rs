@@ -20,6 +20,8 @@ use crate::state::AppState;
 
 /// `GET {callback path}`.
 pub(crate) async fn callback(State(state): State<Arc<AppState>>) -> Response {
+    // The borrow guard is released before the response is built.
+    let published = state.callback.borrow().clone();
     (
         [
             // `unsafe-none` keeps the opener the application holds.
@@ -32,9 +34,12 @@ pub(crate) async fn callback(State(state): State<Arc<AppState>>) -> Response {
             (header::CACHE_CONTROL, "no-store"),
             (header::REFERRER_POLICY, "no-referrer"),
         ],
-        // Computed once at startup over the bytes served.
-        [(header::CONTENT_SECURITY_POLICY, state.callback.csp.clone())],
-        state.callback.body.clone(),
+        // Computed when the document was composed, over the bytes served.
+        [(
+            header::CONTENT_SECURITY_POLICY,
+            published.document.csp.clone(),
+        )],
+        published.document.body.clone(),
     )
         .into_response()
 }

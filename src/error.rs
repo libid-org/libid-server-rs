@@ -54,6 +54,16 @@ pub enum Error {
         detail: String,
     },
 
+    /// The callback artifact could not be retrieved from the Distribution at
+    /// startup; the process does not start.
+    #[error("callback artifact {url}: {detail}")]
+    ArtifactUnavailable {
+        /// The URL that was retrieved.
+        url: String,
+        /// Human-readable failure detail.
+        detail: String,
+    },
+
     /// The MPC-TLS session driver failed.
     #[error(transparent)]
     Tlsn(#[from] libid_tlsn::Error),

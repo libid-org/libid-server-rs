@@ -11,7 +11,8 @@ COPY . .
 RUN cargo build --release --locked
 
 # Runtime stage. No CA bundle: the binary's TLS trust anchors are compiled in
-# (`webpki_root_certs`), the notary link is plain TCP, and the healthcheck is
+# (`webpki_root_certs` for the MPC-TLS session, `webpki_roots` for retrieving
+# the callback artifact), the notary link is plain TCP, and the healthcheck is
 # plaintext loopback. curl serves the healthcheck.
 FROM debian:bookworm-slim
 

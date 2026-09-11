@@ -3,6 +3,7 @@
 //! and a Content-Security-Policy computed here over the bytes served.
 
 pub(crate) mod scan;
+pub(crate) mod upstream;
 
 use axum::http::HeaderValue;
 use base64::{
@@ -20,9 +21,13 @@ use scan::{
     Layout,
 };
 
-/// The artifact compiled into this binary: a valid document that completes no
-/// ceremony, served when no artifact is configured.
-pub(crate) const EMBEDDED: &str = include_str!("callback.html");
+/// A minimal artifact for tests: one configuration slot, one executable
+/// module, one mount point.
+#[cfg(test)]
+pub(crate) const FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/callback.html"
+));
 
 /// What the deployment contributes to the document and its policy.
 pub(crate) struct DeploymentInputs<'a> {
@@ -34,16 +39,6 @@ pub(crate) struct DeploymentInputs<'a> {
     pub(crate) allowed_origins: &'a [String],
 }
 
-/// Where the served artifact came from. It decides what is logged and nothing
-/// else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Source {
-    /// The compiled-in artifact.
-    Embedded,
-    /// A file this deployment supplied.
-    Supplied,
-}
-
 /// The finished document: the exact bytes, and the policy they are served
 /// under.
 pub(crate) struct CallbackDocument {
@@ -52,8 +47,6 @@ pub(crate) struct CallbackDocument {
     /// Its `Content-Security-Policy`, naming a hash for every script the body
     /// carries.
     pub(crate) csp: HeaderValue,
-    /// Where the bytes came from.
-    pub(crate) source: Source,
 }
 
 impl CallbackDocument {
@@ -62,7 +55,6 @@ impl CallbackDocument {
     pub(crate) fn compose(
         html: &str,
         inputs: &DeploymentInputs<'_>,
-        source: Source,
     ) -> Result<CallbackDocument, ArtifactError> {
         let layout = Layout::scan(html)?;
         // The slot holds exactly the marker, and the marker occurs nowhere
@@ -103,9 +95,23 @@ impl CallbackDocument {
         Ok(CallbackDocument {
             body: Bytes::from(body),
             csp,
-            source,
         })
     }
+}
+
+/// A composed document and the validator it was retrieved under.
+///
+/// One value, published as one unit, and that is the point: the ETag advances
+/// only where a document does. A `200` whose body this bridge refuses publishes
+/// nothing, so the next revalidation cannot send `If-None-Match` for a document
+/// that was never served -- which would turn one bad artifact into a permanent
+/// `304` for a document nobody has.
+pub(crate) struct Published {
+    /// The document, and the policy it is served under.
+    pub(crate) document: CallbackDocument,
+    /// The `ETag` the document arrived with, sent back as `If-None-Match`.
+    /// `None` for a configured file, which nothing revalidates.
+    pub(crate) etag: Option<String>,
 }
 
 /// The response policy, from the hashes of the scripts this document carries
@@ -178,7 +184,6 @@ mod tests {
                 ccdp_origin: "https://ccdp.example",
                 allowed_origins: origins,
             },
-            Source::Embedded,
         )
         .expect("composes")
     }
@@ -187,17 +192,17 @@ mod tests {
         String::from_utf8(doc.body.to_vec()).unwrap()
     }
 
-    /// The compiled-in artifact composes.
+    /// The fixture composes.
     #[test]
-    fn the_compiled_in_artifact_composes() {
-        let doc = composed(EMBEDDED, &origins());
+    fn the_fixture_composes() {
+        let doc = composed(FIXTURE, &origins());
         assert!(text(&doc).contains("https://app.example"));
     }
 
     /// The policy names the hash of the script the composed body carries.
     #[test]
     fn the_policy_names_the_hash_of_the_script_the_body_carries() {
-        let doc = composed(EMBEDDED, &origins());
+        let doc = composed(FIXTURE, &origins());
         let html = text(&doc);
         let csp = doc.csp.to_str().unwrap();
 
@@ -215,7 +220,7 @@ mod tests {
     /// origin.
     #[test]
     fn the_inserted_record_is_one_unversioned_list() {
-        let doc = composed(EMBEDDED, &origins());
+        let doc = composed(FIXTURE, &origins());
         let html = text(&doc);
         let open = "<script id=\"libid-callback-config\" type=\"application/json\">";
         let start = html.find(open).unwrap() + open.len();
@@ -230,9 +235,9 @@ mod tests {
     /// Two insertions produce two documents with one `script-src`.
     #[test]
     fn substitution_does_not_move_the_bytes_the_browser_executes() {
-        let one = composed(EMBEDDED, &origins());
+        let one = composed(FIXTURE, &origins());
         let many = composed(
-            EMBEDDED,
+            FIXTURE,
             &["https://a.example".into(), "https://b.example".into()],
         );
         assert_ne!(text(&one), text(&many));
@@ -269,7 +274,7 @@ mod tests {
     #[test]
     fn an_inserted_value_cannot_end_the_script_element() {
         let hostile = vec!["https://a.example/</script><script>x".to_owned()];
-        let doc = composed(EMBEDDED, &hostile);
+        let doc = composed(FIXTURE, &hostile);
         let html = text(&doc);
         assert_eq!(html.matches("<script").count(), 2, "slot and module only");
         assert!(!html.contains("</script><script>x"));
@@ -279,7 +284,7 @@ mod tests {
     /// refused.
     #[test]
     fn a_slot_that_does_not_hold_exactly_the_marker_is_refused() {
-        let filled = EMBEDDED.replace(scan::MARKER, "[]");
+        let filled = FIXTURE.replace(scan::MARKER, "[]");
         assert!(matches!(
             CallbackDocument::compose(
                 &filled,
@@ -287,12 +292,11 @@ mod tests {
                     ccdp_origin: "https://ccdp.example",
                     allowed_origins: &origins(),
                 },
-                Source::Embedded,
             ),
             Err(scan::ArtifactError::Marker)
         ));
 
-        let twice = EMBEDDED.replace(
+        let twice = FIXTURE.replace(
             "const query =",
             &format!("// {}\nconst query =", scan::MARKER),
         );
@@ -303,7 +307,6 @@ mod tests {
                     ccdp_origin: "https://ccdp.example",
                     allowed_origins: &origins(),
                 },
-                Source::Embedded,
             ),
             Err(scan::ArtifactError::Marker)
         ));

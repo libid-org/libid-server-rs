@@ -33,8 +33,10 @@ use tokio::sync::Semaphore;
 use url::Url;
 
 /// Build the shared [`AppState`] from the configuration. Everything that must
-/// be well-formed for a request to succeed is checked here, at startup.
-pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
+/// be well-formed for a request to succeed is checked here, at startup, and
+/// the callback artifact is retrieved from the Distribution before this
+/// returns; it returns `Err` when it cannot.
+pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let callback_path = callback_path(&cfg.callback_path)?;
 
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
@@ -91,6 +93,9 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         }
     };
 
+    let (upstream, published) = callback_source(&ccdp_origin, &allowed_origins).await?;
+    let (callback_tx, callback) = tokio::sync::watch::channel(Arc::new(published));
+
     Ok(Arc::new(AppState {
         ceremony_config: deployment::CeremonyConfig {
             callback_path: &callback_path,
@@ -98,11 +103,9 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             platforms: &platforms,
         }
         .serialized(),
-        callback: artifact::CallbackDocument::for_deployment(
-            cfg,
-            &ccdp_origin,
-            &allowed_origins,
-        )?,
+        callback,
+        callback_tx,
+        upstream,
         allowed_origins,
         callback_path,
         github,
@@ -110,95 +113,54 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 }
 
 /// Serve `state` on `listener` until `shutdown` resolves; in-flight requests
-/// finish first.
+/// finish first. The callback artifact is revalidated for as long as this
+/// runs.
 pub async fn serve(
     state: Arc<AppState>,
     listener: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let app = routes::build_router(state);
-    axum::serve(listener, app)
+    let app = routes::build_router(state.clone());
+    let refreshing = tokio::spawn(refresh_callback(state));
+    let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
+        .await;
+    refreshing.abort();
+    served
+}
+
+/// Revalidate the callback artifact for as long as the process runs; it
+/// returns only when the process ends.
+pub async fn refresh_callback(state: Arc<AppState>) {
+    artifact::upstream::refresh(state, artifact::upstream::Schedule::DEPLOYED).await
+}
+
+/// The callback document, retrieved from `{ccdpOrigin}/ccdp/callback.html`.
+/// A retrieval that fails is an error, and the process does not start.
+async fn callback_source(
+    ccdp_origin: &str,
+    allowed_origins: &[String],
+) -> Result<(artifact::upstream::Upstream, artifact::Published)> {
+    let upstream = artifact::upstream::Upstream::new(ccdp_origin)?;
+    let url = upstream.url();
+    // The first GET carries no validator.
+    let published = upstream
+        .retrieve(allowed_origins, None)
         .await
-}
-
-impl artifact::CallbackDocument {
-    /// The document this deployment serves: the artifact
-    /// `CALLBACK_ARTIFACT_PATH` names, or the compiled-in floor when it is
-    /// empty. Both go through the same validation and composition. Read at
-    /// startup, not fetched.
-    fn for_deployment(
-        cfg: &config::Config,
-        ccdp_origin: &str,
-        allowed_origins: &[String],
-    ) -> Result<Self> {
-        let path = cfg.callback_artifact_path.trim();
-        let (html, source) = if path.is_empty() {
-            (artifact::EMBEDDED.to_owned(), artifact::Source::Embedded)
-        } else {
-            (read_artifact(path)?, artifact::Source::Supplied)
-        };
-
-        let document = artifact::CallbackDocument::compose(
-            &html,
-            &artifact::DeploymentInputs {
-                ccdp_origin,
-                allowed_origins,
-            },
-            source,
-        )
-        .map_err(|e| Error::Config {
-            detail: match source {
-                artifact::Source::Embedded => {
-                    format!("the compiled-in callback artifact is not serveable: {e}")
-                }
-                artifact::Source::Supplied => {
-                    format!("CALLBACK_ARTIFACT_PATH {path} is not serveable: {e}")
-                }
-            },
-        })?;
-
-        match document.source {
-            artifact::Source::Embedded => tracing::warn!(
-                "serving the COMPILED-IN callback artifact: it clears the OAuth return \
-             and renders fixed text, and completes no ceremony. Set \
-             CALLBACK_ARTIFACT_PATH to a callback.html from the CCDP \
-             Distribution before running this deployment."
-            ),
-            artifact::Source::Supplied => {
-                tracing::info!(path, "serving the configured callback artifact")
-            }
-        }
-        Ok(document)
-    }
-}
-
-/// Read a configured artifact, refusing one over `MAX_ARTIFACT_BYTES` before
-/// reading it. The size is read off the open handle, and bounded again while
-/// reading.
-fn read_artifact(path: &str) -> Result<String> {
-    use std::io::Read as _;
-
-    let refuse = |detail: String| Error::Config {
-        detail: format!("CALLBACK_ARTIFACT_PATH {path}: {detail}"),
-    };
-    let file = std::fs::File::open(path).map_err(|e| refuse(format!("{e}")))?;
-    let len = file.metadata().map_err(|e| refuse(format!("{e}")))?.len();
-    let bound = artifact::scan::MAX_ARTIFACT_BYTES as u64;
-    if len > bound {
-        return Err(refuse(format!(
-            "is {len} bytes, over the {bound}-byte bound"
-        )));
-    }
-    // One byte over refuses; nothing is served from a prefix.
-    let mut html = String::new();
-    file.take(bound + 1)
-        .read_to_string(&mut html)
-        .map_err(|e| refuse(format!("{e}")))?;
-    if html.len() as u64 > bound {
-        return Err(refuse(format!("is over the {bound}-byte bound")));
-    }
-    Ok(html)
+        .map_err(|e| Error::ArtifactUnavailable {
+            url: url.clone(),
+            detail: format!("{e}"),
+        })?
+        // `None` answers only a request that carried a validator; a `304` to
+        // an unconditional request is refused inside `retrieve`.
+        .expect("an unconditional retrieval yields a document or an error");
+    tracing::info!(
+        url,
+        etag = published.etag.as_deref().unwrap_or("<none>"),
+        policy = published.document.csp.to_str().unwrap_or("<unreadable>"),
+        "retrieved the callback artifact"
+    );
+    Ok((upstream, published))
 }
 
 /// The application origins admitted to read the configuration.
@@ -344,9 +306,46 @@ fn callback_path(path: &str) -> Result<String> {
     Ok(path.to_owned())
 }
 
+/// What every test in this crate builds a deployment from. `tests/http.rs`
+/// keeps its own copy: an integration test cannot see a `#[cfg(test)]` item.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod fixtures {
+    use std::sync::{
+        LazyLock,
+        OnceLock,
+    };
+
+    use crate::{
+        artifact::upstream::Distribution,
+        config,
+    };
+
+    /// The runtime shared fixtures are served on. `#[tokio::test]` drops each
+    /// test's runtime, and every task on it, when the test returns; this one
+    /// is never dropped.
+    pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the shared fixtures")
+        });
+        &RUNTIME
+    }
+
+    /// One Distribution on loopback serving the fixture artifact, started once
+    /// and shared by every test that builds a deployment.
+    pub(crate) fn distribution() -> &'static Distribution {
+        static SHARED: OnceLock<Distribution> = OnceLock::new();
+        SHARED.get_or_init(|| {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| runtime().block_on(Distribution::healthy()))
+                    .join()
+                    .expect("the shared Distribution starts")
+            })
+        })
+    }
 
     /// A loopback port nothing listens on, bound once and released: a session
     /// a test does start fails at the dial instead of reaching a notary on
@@ -364,15 +363,16 @@ mod tests {
     /// Every flag that reads an environment variable is listed, so the
     /// process environment reaches nothing. `--platforms` is this fixture's
     /// own: the JSON records go to `Config::platforms`, which the binary
-    /// fills from the configuration file.
-    fn config(args: &[&str]) -> config::Config {
+    /// fills from the configuration file. The CCDP origin is the shared
+    /// Distribution's unless `args` names another.
+    pub(crate) fn config(args: &[&str]) -> config::Config {
         let mut flags: Vec<(&str, &str)> = vec![
             ("--host", "127.0.0.1"),
             ("--port", "8722"),
             ("--notary-wire-port", dead_port()),
             ("--callback-path", "/auth/callback"),
             ("--allowed-app-origins", "https://app.example"),
-            ("--ccdp-origin", "https://ccdp.example"),
+            ("--ccdp-origin", distribution().origin()),
             (
                 "--platforms",
                 r#"[{"id":"github","client_id":"Iv1.0123456789abcdef","versions":[1]}]"#,
@@ -403,12 +403,23 @@ mod tests {
             serde_json::from_str(platforms).expect("the fixture's platform records");
         cfg
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        fixtures::{
+            config,
+            distribution,
+        },
+        *,
+    };
 
     /// An omitted CCDP origin selects the canonical libID Distribution: the
     /// declared default is `https://lib.id`, and the configured value reaches
     /// the published record.
-    #[test]
-    fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
+    #[tokio::test]
+    async fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
         let command = <config::Config as clap::CommandFactory>::command();
         let arg = command
             .get_arguments()
@@ -416,10 +427,10 @@ mod tests {
             .expect("the ccdp origin is an argument");
         assert_eq!(arg.get_default_values(), ["https://lib.id"]);
 
-        let state = build_state(&config(&["--ccdp-origin", "https://lib.id"])).unwrap();
+        let state = build_state(&config(&[])).await.unwrap();
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
-        assert_eq!(record["ccdpOrigin"], "https://lib.id");
+        assert_eq!(record["ccdpOrigin"], distribution().origin());
     }
 
     /// Plaintext `http` is admitted on exactly `localhost` and `127.0.0.1`,
@@ -440,69 +451,28 @@ mod tests {
         }
     }
 
-    /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the default
-    /// joins, an override joins in its place, and an origin already listed is
-    /// not added twice.
-    #[test]
-    fn the_effective_admission_set_is_the_allowlist_plus_the_ccdp_origin() {
-        let origins = |args: &[&str]| -> Vec<String> {
-            build_state(&config(args)).unwrap().allowed_origins.to_vec()
-        };
+    /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the resolved
+    /// origin joins once, and an origin already listed is not added twice.
+    #[tokio::test]
+    async fn the_effective_admission_set_is_the_allowlist_plus_the_ccdp_origin() {
+        async fn origins(args: &[&str]) -> Vec<String> {
+            build_state(&config(args))
+                .await
+                .unwrap()
+                .allowed_origins
+                .to_vec()
+        }
+        let ccdp = distribution().origin().to_owned();
 
+        let joined = origins(&[]).await;
+        assert_eq!(joined, ["https://app.example".to_owned(), ccdp.clone()]);
+        assert!(!joined.iter().any(|o| o == "https://lib.id"));
+
+        let listed = format!("https://app.example,{ccdp}");
         assert_eq!(
-            origins(&["--ccdp-origin", "https://lib.id"]),
-            ["https://app.example", "https://lib.id"]
+            origins(&["--allowed-app-origins", &listed]).await,
+            ["https://app.example".to_owned(), ccdp]
         );
-
-        let overridden = origins(&["--ccdp-origin", "https://ccdp.example"]);
-        assert_eq!(overridden, ["https://app.example", "https://ccdp.example"]);
-        assert!(!overridden.iter().any(|o| o == "https://lib.id"));
-
-        assert_eq!(
-            origins(&[
-                "--allowed-app-origins",
-                "https://app.example,https://ccdp.example",
-                "--ccdp-origin",
-                "https://ccdp.example",
-            ]),
-            ["https://app.example", "https://ccdp.example"]
-        );
-    }
-
-    /// A configured artifact over `MAX_ARTIFACT_BYTES` is refused, naming the
-    /// setting, before it is read; one within the bound is read and composed.
-    #[test]
-    fn an_artifact_file_over_the_bound_is_refused_before_it_is_read() {
-        let dir = std::env::temp_dir().join(format!(
-            "libid-artifact-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let too_big = dir.join("too-big.html");
-        std::fs::write(&too_big, vec![b'x'; artifact::scan::MAX_ARTIFACT_BYTES + 1])
-            .unwrap();
-        let Err(refusal) = build_state(&config(&[
-            "--callback-artifact-path",
-            too_big.to_str().unwrap(),
-        ])) else {
-            panic!("an artifact over the bound is not serveable")
-        };
-        let detail = format!("{refusal}");
-        assert!(detail.contains("bound"), "{detail}");
-        assert!(detail.contains("CALLBACK_ARTIFACT_PATH"), "{detail}");
-
-        let fine = dir.join("fine.html");
-        std::fs::write(&fine, artifact::EMBEDDED).unwrap();
-        let state = build_state(&config(&[
-            "--callback-artifact-path",
-            fine.to_str().unwrap(),
-        ]))
-        .expect("a configured artifact within the bound is serveable");
-        assert_eq!(state.callback.source, artifact::Source::Supplied);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// An underscore in a host is admitted; the bytes a Content-Security-Policy
@@ -521,8 +491,8 @@ mod tests {
     }
 
     /// Each of these is refused at startup.
-    #[test]
-    fn a_deployment_that_could_not_serve_a_ceremony_stops_the_process() {
+    #[tokio::test]
+    async fn a_deployment_that_could_not_serve_a_ceremony_stops_the_process() {
         for (why, args) in [
             ("no admitted origin", vec!["--allowed-app-origins", ""]),
             (
@@ -586,7 +556,7 @@ mod tests {
             ),
         ] {
             assert!(
-                build_state(&config(&args)).is_err(),
+                build_state(&config(&args)).await.is_err(),
                 "{why} must stop the process"
             );
         }
@@ -594,12 +564,12 @@ mod tests {
 
     /// The published record keys every enabled platform by name and carries
     /// its client id and versions, and no secret.
-    #[test]
-    fn the_published_configuration_keys_every_enabled_platform_by_name() {
+    #[tokio::test]
+    async fn the_published_configuration_keys_every_enabled_platform_by_name() {
         let state = build_state(&config(&[
             "--platforms",
             r#"[{"id":"google","client_id":"g","versions":[1,2]},{"id":"x","client_id":"xc","versions":[3]},{"id":"github","client_id":"gh","versions":[1]}]"#,
-        ]))
+        ])).await
         .unwrap();
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
@@ -617,17 +587,17 @@ mod tests {
 
     /// A github platform without a secret, or a secret without a github
     /// platform, refuses to start; neither is a deployment without the route.
-    #[test]
-    fn the_github_secret_and_the_github_platform_require_each_other() {
+    #[tokio::test]
+    async fn the_github_secret_and_the_github_platform_require_each_other() {
         let no_secret = vec!["--gh-oauth-client-secret", ""];
-        assert!(build_state(&config(&no_secret)).is_err());
+        assert!(build_state(&config(&no_secret)).await.is_err());
 
         let x_only = vec![
             "--platforms",
             r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
         ];
         assert!(
-            build_state(&config(&x_only)).is_err(),
+            build_state(&config(&x_only)).await.is_err(),
             "a secret with no github platform must stop the process"
         );
 
@@ -637,15 +607,15 @@ mod tests {
             "--gh-oauth-client-secret",
             "",
         ];
-        let state = build_state(&config(&neither)).unwrap();
+        let state = build_state(&config(&neither)).await.unwrap();
         assert!(state.github.is_none());
     }
 
     /// `build_router` mounts every path for a deployment with the token route
     /// and one without.
-    #[test]
-    fn building_the_router_for_a_configured_deployment_does_not_panic() {
-        let state = build_state(&config(&[])).unwrap();
+    #[tokio::test]
+    async fn building_the_router_for_a_configured_deployment_does_not_panic() {
+        let state = build_state(&config(&[])).await.unwrap();
         let _: axum::Router = routes::build_router(state);
 
         let x_only = build_state(&config(&[
@@ -654,6 +624,7 @@ mod tests {
             "--gh-oauth-client-secret",
             "",
         ]))
+        .await
         .unwrap();
         let _: axum::Router = routes::build_router(x_only);
     }
@@ -666,7 +637,7 @@ mod tests {
             AsyncWriteExt,
         };
 
-        let state = build_state(&config(&[])).unwrap();
+        let state = build_state(&config(&[])).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
