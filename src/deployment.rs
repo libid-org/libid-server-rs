@@ -43,12 +43,11 @@ const GITHUB_ONLY_VERSION: u16 = 1;
 
 /// One enabled platform.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PlatformProfile {
     /// Which platform.
     pub id: PlatformId,
-    /// The public OAuth client identifier. Also accepted as `client_id`.
-    #[serde(alias = "client_id")]
+    /// The public OAuth client identifier.
     pub client_id: String,
     /// Platform ceremony versions, nonempty and duplicate-free. List order
     /// has no meaning.
@@ -82,7 +81,7 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
             return Err(refuse(format!("{id} appears more than once")));
         }
         if p.client_id.is_empty() {
-            return Err(refuse(format!("{id} carries no clientId")));
+            return Err(refuse(format!("{id} carries no client_id")));
         }
         if p.versions.is_empty() {
             return Err(refuse(format!("{id} advertises no version")));
@@ -148,7 +147,7 @@ impl CeremonyConfig<'_> {
 mod tests {
     use super::*;
 
-    const ONE: &str = r#"[{"id":"github","clientId":"Iv1.0","versions":[1]}]"#;
+    const ONE: &str = r#"[{"id":"github","client_id":"Iv1.0","versions":[1]}]"#;
 
     /// Parse records as the configuration file would, then check them.
     fn checked(json: &str) -> Result<Vec<PlatformProfile>> {
@@ -174,27 +173,27 @@ mod tests {
             ("empty", "[]"),
             (
                 "unknown platform",
-                r#"[{"id":"twitter","clientId":"a","versions":[1]}]"#,
+                r#"[{"id":"twitter","client_id":"a","versions":[1]}]"#,
             ),
             (
                 "duplicate platform",
-                r#"[{"id":"x","clientId":"a","versions":[1]},{"id":"x","clientId":"b","versions":[1]}]"#,
+                r#"[{"id":"x","client_id":"a","versions":[1]},{"id":"x","client_id":"b","versions":[1]}]"#,
             ),
             (
                 "no versions",
-                r#"[{"id":"x","clientId":"a","versions":[]}]"#,
+                r#"[{"id":"x","client_id":"a","versions":[]}]"#,
             ),
             (
                 "duplicate version",
-                r#"[{"id":"x","clientId":"a","versions":[1,1]}]"#,
+                r#"[{"id":"x","client_id":"a","versions":[1,1]}]"#,
             ),
             (
                 "github on a version its token service does not implement",
-                r#"[{"id":"github","clientId":"a","versions":[2]}]"#,
+                r#"[{"id":"github","client_id":"a","versions":[2]}]"#,
             ),
             (
                 "additional member",
-                r#"[{"id":"x","clientId":"a","label":"X","versions":[1]}]"#,
+                r#"[{"id":"x","client_id":"a","label":"X","versions":[1]}]"#,
             ),
         ] {
             assert!(checked(json).is_err(), "{why} must be refused");

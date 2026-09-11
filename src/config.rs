@@ -42,10 +42,9 @@ pub struct Config {
     pub notary_wire_port: u16,
 
     /// Comma-separated application origins admitted to read the public
-    /// ceremony configuration. Nonempty, each in canonical form. Empty means
-    /// unset.
-    #[arg(long, env = "ALLOWED_APP_ORIGINS", default_value = "")]
-    pub allowed_app_origins: String,
+    /// ceremony configuration. Nonempty, each in canonical form.
+    #[arg(long, env = "ALLOWED_APP_ORIGINS", value_delimiter = ',')]
+    pub allowed_app_origins: Vec<String>,
 
     /// The path the providers redirect back to. The registered OAuth callback
     /// URL is this bridge's public origin followed by this path.
@@ -95,7 +94,7 @@ pub struct FileConfig {
     pub port: Option<u16>,
     /// [`Config::notary_wire_port`].
     pub notary_wire_port: Option<u16>,
-    /// [`Config::allowed_app_origins`], as a list.
+    /// [`Config::allowed_app_origins`].
     pub allowed_app_origins: Option<Vec<String>>,
     /// [`Config::callback_path`].
     pub callback_path: Option<String>,
@@ -182,9 +181,8 @@ impl Config {
                 .unwrap_or(cfg.gh_oauth_client_secret);
         }
         if defaulted(&matches, "allowed_app_origins") {
-            if let Some(origins) = file.allowed_app_origins {
-                cfg.allowed_app_origins = origins.join(",");
-            }
+            cfg.allowed_app_origins =
+                file.allowed_app_origins.unwrap_or(cfg.allowed_app_origins);
         }
         cfg.platforms = file.platforms.unwrap_or_default();
         Ok(cfg)
@@ -252,7 +250,7 @@ mod file_tests {
         assert_eq!(cfg.callback_path, "/oauth/return");
         assert_eq!(
             cfg.allowed_app_origins,
-            "https://app.example,https://wallet.example"
+            ["https://app.example", "https://wallet.example"]
         );
         assert_eq!(cfg.gh_oauth_client_secret, "ghs_from_the_file");
         let platforms = crate::deployment::platforms(cfg.platforms)
@@ -306,7 +304,7 @@ mod file_tests {
         assert_eq!(cfg.notary_wire_port, 7047);
         assert_eq!(
             cfg.allowed_app_origins,
-            "https://app.example,https://wallet.example"
+            ["https://app.example", "https://wallet.example"]
         );
         let platforms = crate::deployment::platforms(cfg.platforms)
             .expect("the example's platform table");
@@ -318,5 +316,18 @@ mod file_tests {
     fn a_misspelled_key_is_refused() {
         let err = resolved("prot = 9110\n", &[]).expect_err("an unknown key");
         assert!(err.to_string().contains("prot"), "{err}");
+    }
+
+    /// The flag beats the file, and `Debug` prints neither secret.
+    #[test]
+    fn the_secret_is_redacted_from_debug_output() {
+        let cfg = resolved(
+            "gh_oauth_client_secret = \"ghs_from_the_file\"\n",
+            &["--gh-oauth-client-secret", "ghs_from_a_flag"],
+        )
+        .expect("readable");
+        let printed = format!("{cfg:?}");
+        assert!(!printed.contains("ghs_"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
     }
 }

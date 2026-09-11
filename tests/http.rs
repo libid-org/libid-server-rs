@@ -52,7 +52,7 @@ fn deployment(overrides: &[&str]) -> Arc<AppState> {
         ("--notary-wire-port", dead_port()),
         (
             "--platforms",
-            r#"[{"id":"github","clientId":"test-client-id","versions":[1]}]"#,
+            r#"[{"id":"github","client_id":"test-client-id","versions":[1]}]"#,
         ),
         ("--gh-oauth-client-secret", "test-client-secret"),
     ];
@@ -489,7 +489,7 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
 async fn the_token_route_is_absent_when_github_is_not_enabled() {
     let state = deployment(&[
         "--platforms",
-        r#"[{"id":"x","clientId":"test-client-id","versions":[1]}]"#,
+        r#"[{"id":"x","client_id":"test-client-id","versions":[1]}]"#,
         "--gh-oauth-client-secret",
         "",
     ]);

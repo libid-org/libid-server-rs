@@ -198,11 +198,11 @@ fn read_artifact(path: &str) -> Result<String> {
 }
 
 /// The application origins admitted to read the configuration.
-fn allowed_app_origins(list: &str) -> Result<Vec<String>> {
+fn allowed_app_origins(list: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for (i, spelling) in list
-        .split(',')
-        .map(str::trim)
+        .iter()
+        .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .enumerate()
     {
@@ -373,7 +373,7 @@ mod tests {
             ("--ccdp-origin", "https://ccdp.example"),
             (
                 "--platforms",
-                r#"[{"id":"github","clientId":"Iv1.0123456789abcdef","versions":[1]}]"#,
+                r#"[{"id":"github","client_id":"Iv1.0123456789abcdef","versions":[1]}]"#,
             ),
             ("--gh-oauth-client-secret", "ghs_secret"),
         ];
@@ -598,7 +598,7 @@ mod tests {
     fn the_published_configuration_keys_every_enabled_platform_by_name() {
         let state = build_state(&config(&[
             "--platforms",
-            r#"[{"id":"google","clientId":"g","versions":[1,2]},{"id":"x","clientId":"xc","versions":[3]},{"id":"github","clientId":"gh","versions":[1]}]"#,
+            r#"[{"id":"google","client_id":"g","versions":[1,2]},{"id":"x","client_id":"xc","versions":[3]},{"id":"github","client_id":"gh","versions":[1]}]"#,
         ]))
         .unwrap();
         let record: serde_json::Value =
@@ -624,7 +624,7 @@ mod tests {
 
         let x_only = vec![
             "--platforms",
-            r#"[{"id":"x","clientId":"abc","versions":[1]}]"#,
+            r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
         ];
         assert!(
             build_state(&config(&x_only)).is_err(),
@@ -633,7 +633,7 @@ mod tests {
 
         let neither = vec![
             "--platforms",
-            r#"[{"id":"x","clientId":"abc","versions":[1]}]"#,
+            r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
             "--gh-oauth-client-secret",
             "",
         ];
@@ -650,7 +650,7 @@ mod tests {
 
         let x_only = build_state(&config(&[
             "--platforms",
-            r#"[{"id":"x","clientId":"abc","versions":[1]}]"#,
+            r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
             "--gh-oauth-client-secret",
             "",
         ]))
