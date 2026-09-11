@@ -263,7 +263,10 @@ mod tests {
                     .unwrap();
                 Some(writer)
             }
-            Notary::ClosesWithoutOne => None,
+            Notary::ClosesWithoutOne => {
+                drop(writer);
+                None
+            }
             Notary::StaysSilent => Some(writer),
         };
         let result = assemble(kept, openings, &mut reader).await;
@@ -375,7 +378,7 @@ mod tests {
         let failed = assembled(selected(), &[bearer_opening()], Notary::ClosesWithoutOne)
             .await
             .unwrap_err();
-        assert!(detail(failed).contains("sent no record"));
+        assert!(detail(failed).contains("for the session it ran"));
     }
 
     /// A notary that keeps the socket open and writes nothing, past the
