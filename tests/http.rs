@@ -14,9 +14,16 @@ use http_body_util::BodyExt;
 use libid_server_rs::{
     fixtures::{
         self,
+        token_body_with,
+        token_request,
         Distribution,
+        CODE,
+        VERIFIER,
     },
-    routes,
+    routes::{
+        self,
+        TOKEN_PATH,
+    },
     state::AppState,
 };
 use tower::ServiceExt;
@@ -68,63 +75,12 @@ async fn health_answers_ok_and_carries_nosniff_like_every_other_route() {
 //
 // Every case here is refused before a notary session is opened.
 
-const VERIFIER: &str = "iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I";
-
-const TOKEN: &str = "/api/v1/ceremony/github-token";
-
-/// A `POST` to `path` carrying `body` as `media`, with one `Origin` header per
-/// member of `origins`.
-fn token_request(
-    path: &str,
-    media: &str,
-    origins: &[&str],
-    body: String,
-) -> Request<Body> {
-    let mut req = Request::post(path).header("content-type", media);
-    for origin in origins {
-        req = req.header("origin", *origin);
-    }
-    req.body(Body::from(body)).unwrap()
-}
-
 /// `POST` the token route of the default deployment.
 async fn post_token(origins: &[&str], body: String) -> axum::response::Response {
     app(test_state().await)
-        .oneshot(token_request(TOKEN, "application/json", origins, body))
+        .oneshot(token_request(TOKEN_PATH, "application/json", origins, body))
         .await
         .unwrap()
-}
-
-/// A notary as a request names one: the origin the browser resolved from the
-/// ledger. This bridge dials its host on the fixture's dead wire port.
-const NOTARY: &str = "https://127.0.0.1:7048";
-
-/// The registered callback URL a request carries: the fixture's callback path
-/// under a canonical origin.
-const REDIRECT: &str = "https://bridge.example/auth/callback";
-
-/// A request body carrying every field the route takes, with `overrides`
-/// replacing or adding members.
-fn token_body_with(overrides: &[(&str, &str)]) -> String {
-    let mut fields: Vec<(&str, &str)> = vec![
-        ("code", CODE),
-        ("codeVerifier", VERIFIER),
-        ("redirectUri", REDIRECT),
-        ("notaryAddress", NOTARY),
-    ];
-    for (name, value) in overrides {
-        match fields.iter_mut().find(|(f, _)| f == name) {
-            Some(slot) => slot.1 = value,
-            None => fields.push((name, value)),
-        }
-    }
-    serde_json::Value::Object(
-        fields
-            .into_iter()
-            .map(|(name, value)| (name.to_owned(), serde_json::Value::from(value)))
-            .collect(),
-    )
-    .to_string()
 }
 
 /// The same body with `field` left out.
@@ -139,10 +95,6 @@ fn token_body_without(field: &str) -> String {
 fn token_body(code: &str, verifier: &str) -> String {
     token_body_with(&[("code", code), ("codeVerifier", verifier)])
 }
-
-/// A code of the shape GitHub issues, for the cases where the code is not what
-/// is under test.
-const CODE: &str = "6b7f2c1d9e4a8035";
 
 fn valid_body() -> String {
     token_body(CODE, VERIFIER)
@@ -242,7 +194,7 @@ async fn posted_with_no_permit_free(body: String) -> axum::response::Response {
         .expect("every permit is free at the start of this test");
     app(state.clone())
         .oneshot(token_request(
-            TOKEN,
+            TOKEN_PATH,
             "application/json",
             &[ccdp_origin()],
             body,
@@ -284,7 +236,7 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
             .oneshot(
                 Request::builder()
                     .method("OPTIONS")
-                    .uri(TOKEN)
+                    .uri(TOKEN_PATH)
                     .header("origin", origin)
                     .header("access-control-request-method", "POST")
                     .body(Body::empty())
@@ -488,7 +440,7 @@ async fn the_token_route_is_absent_when_github_is_not_enabled() {
     .await;
     let resp = app(state)
         .oneshot(token_request(
-            TOKEN,
+            TOKEN_PATH,
             "application/json",
             &[ccdp_origin()],
             valid_body(),
@@ -647,7 +599,7 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
 #[tokio::test]
 async fn github_token_refuses_a_query() {
     let req = token_request(
-        &format!("{TOKEN}?trace=1"),
+        &format!("{TOKEN_PATH}?trace=1"),
         "application/json",
         &[ccdp_origin()],
         valid_body(),
@@ -668,7 +620,7 @@ async fn github_token_takes_exactly_one_media_type() {
         ("application/vnd.libid+json", false),
         ("text/plain", false),
     ] {
-        let req = token_request(TOKEN, media, &[ccdp_origin()], body.clone());
+        let req = token_request(TOKEN_PATH, media, &[ccdp_origin()], body.clone());
         let resp = app(test_state().await).oneshot(req).await.unwrap();
         let expected = if admitted {
             StatusCode::BAD_REQUEST

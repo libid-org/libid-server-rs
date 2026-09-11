@@ -14,7 +14,9 @@ use std::{
 };
 
 use axum::{
+    body::Body,
     extract::State,
+    http::Request,
     response::IntoResponse,
     routing::get,
     Router,
@@ -284,4 +286,57 @@ impl AppState {
             .await
             .expect("a deployment the fixtures can serve")
     }
+}
+
+/// A PKCE verifier of the length the token route accepts.
+pub const VERIFIER: &str = "iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I";
+
+/// An authorization code of the shape GitHub issues.
+pub const CODE: &str = "6b7f2c1d9e4a8035";
+
+/// A notary as a request names one: the origin the browser resolved from the
+/// ledger. A deployment dials its host on the wire port.
+pub const NOTARY: &str = "https://127.0.0.1:7048";
+
+/// A registered callback URL: the fixture's callback path under a canonical
+/// origin.
+pub const REDIRECT: &str = "https://bridge.example/auth/callback";
+
+/// A `POST` to `path` carrying `body` as `media`, with one `Origin` header per
+/// member of `origins`.
+pub fn token_request(
+    path: &str,
+    media: &str,
+    origins: &[&str],
+    body: String,
+) -> Request<Body> {
+    let mut req = Request::post(path).header("content-type", media);
+    for origin in origins {
+        req = req.header("origin", *origin);
+    }
+    req.body(Body::from(body)).unwrap()
+}
+
+/// A token request body carrying every field the route takes, with
+/// `overrides` replacing or adding members.
+pub fn token_body_with(overrides: &[(&str, &str)]) -> String {
+    let mut fields: Vec<(&str, &str)> = vec![
+        ("code", CODE),
+        ("codeVerifier", VERIFIER),
+        ("redirectUri", REDIRECT),
+        ("notaryAddress", NOTARY),
+    ];
+    for (name, value) in overrides {
+        match fields.iter_mut().find(|(f, _)| f == name) {
+            Some(slot) => slot.1 = value,
+            None => fields.push((name, value)),
+        }
+    }
+    serde_json::Value::Object(
+        fields
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), serde_json::Value::from(value)))
+            .collect(),
+    )
+    .to_string()
 }

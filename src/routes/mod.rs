@@ -81,9 +81,9 @@ async fn health() -> impl axum::response::IntoResponse {
 /// collides with a fixed route.
 pub(crate) const HEALTH_PATH: &str = "/health";
 /// The public ceremony configuration.
-pub(crate) const CONFIG_PATH: &str = "/api/v1/ceremony/config";
+pub const CONFIG_PATH: &str = "/api/v1/ceremony/config";
 /// The confidential GitHub exchange.
-pub(crate) const TOKEN_PATH: &str = "/api/v1/ceremony/github-token";
+pub const TOKEN_PATH: &str = "/api/v1/ceremony/github-token";
 
 /// Every fixed path, for the configured callback path to be checked against.
 pub(crate) const FIXED_PATHS: [&str; 3] = [HEALTH_PATH, CONFIG_PATH, TOKEN_PATH];
