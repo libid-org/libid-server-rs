@@ -75,9 +75,10 @@ pub(super) fn layout_failed(e: &ceremony::LayoutError) -> libid_tlsn::Error {
 pub(super) async fn exchange(
     github: &GithubExchange,
     request: &TokenRequest,
+    redirect_uri: &str,
     notary_host: &str,
 ) -> Result<TokenResponse, Error> {
-    let http_request = token_http_request(&github.credentials, request);
+    let http_request = token_http_request(&github.credentials, request, redirect_uri);
     let socket = github.egress.reach(notary_host).await?;
 
     // What the layout decided, kept from inside the session. The bearer's

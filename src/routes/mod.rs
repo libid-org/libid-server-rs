@@ -50,8 +50,7 @@ use crate::state::AppState;
 /// comparison on the token route -- and two spellings of one rule drift the
 /// first time either is tightened.
 pub(crate) enum Origins<'a> {
-    /// No `Origin` at all. A top-level navigation looks like this, and so does
-    /// a same-origin fetch, so only Fetch metadata can tell them apart.
+    /// No `Origin` at all, which neither gated route admits.
     Absent,
     /// Exactly one, which is the only case that can be admitted on its value.
     One(&'a axum::http::HeaderValue),

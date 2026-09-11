@@ -62,8 +62,9 @@ mod transcript;
 
 pub(crate) use request::force_token_endpoint;
 
-/// What the browser sends: the code, the PKCE verifier and the notary. The
-/// client, secret, redirect URI and endpoint are this service's own.
+/// What the browser sends: the code, the PKCE verifier, the redirect URI its
+/// authorization request carried, and the notary. The client, secret and
+/// endpoint are this service's own.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct TokenRequestBody {
@@ -71,6 +72,9 @@ pub(crate) struct TokenRequestBody {
     code: String,
     /// The PKCE verifier the browser derived for this ceremony.
     code_verifier: String,
+    /// The registered callback URL: this bridge's public origin followed by
+    /// its callback path. Sent to GitHub byte for byte.
+    redirect_uri: String,
     /// The notary the browser's identity session ran against, as a canonical
     /// origin: HTTPS, or HTTP on exactly `localhost` or `127.0.0.1`. This
     /// bridge dials its host on the wire port for the token session.
@@ -328,6 +332,12 @@ pub(crate) async fn github_token(
             message: "the request body is not a TokenRequest".into(),
         }
     })?;
+    let redirect_uri = redirect_uri(&body.redirect_uri, &github.callback_path)
+        .ok_or_else(|| {
+            TokenError::bad_request(
+                "redirectUri is not this bridge's callback path under a canonical origin",
+            )
+        })?;
     // The spelling is checked here; where the host resolves, and whether it
     // is dialled, is decided in `egress` after the permit is taken.
     let notary_host = notary_host(&body.notary_address).ok_or_else(|| {
@@ -359,7 +369,7 @@ pub(crate) async fn github_token(
         message: "too many exchanges in flight; retry shortly".into(),
     })?;
 
-    let response = session::exchange(&github, &request, &notary_host)
+    let response = session::exchange(&github, &request, redirect_uri, &notary_host)
         .await
         .map_err(TokenError::from_exchange)?;
     // The bounds are checked on the way out as well as in: the three values are
@@ -400,6 +410,26 @@ fn b64(bytes: &[u8]) -> String {
 ///
 /// Shared because the same transcript is the subject of two modules — the one
 /// that writes it and the one that reads it.
+/// `spelling`, if it is the registered callback URL: a canonical origin --
+/// HTTPS, or HTTP on exactly `localhost` or `127.0.0.1` -- followed by exactly
+/// `callback_path`, with no query, fragment or credentials.
+fn redirect_uri<'a>(spelling: &'a str, callback_path: &str) -> Option<&'a str> {
+    let url = url::Url::parse(spelling).ok()?;
+    let plaintext_loopback = url.scheme() == "http"
+        && matches!(url.host_str(), Some("localhost" | "127.0.0.1"));
+    if !(url.scheme() == "https" || plaintext_loopback)
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != callback_path
+        || format!("{}{callback_path}", url.origin().ascii_serialization()) != spelling
+    {
+        return None;
+    }
+    Some(spelling)
+}
+
 /// The host a notary origin names. HTTP is development-only on explicit
 /// localhost/127.0.0.1, matching the browser's local transport exception.
 fn notary_host(spelling: &str) -> Option<String> {
@@ -445,9 +475,11 @@ mod fixtures {
         crate::oauth::OAuthCredentials {
             client_id: "Iv1.0123456789abcdef".into(),
             client_secret: client_secret.into(),
-            redirect_uri: "http://127.0.0.1:8722/auth/callback".into(),
         }
     }
+
+    /// The registered callback URL the fixture request carries.
+    pub(super) const REDIRECT_URI: &str = "http://127.0.0.1:8722/auth/callback";
 
     pub(super) fn request() -> TokenRequest {
         TokenRequest {
@@ -461,14 +493,51 @@ mod fixtures {
         credentials: &OAuthCredentials,
         request: &TokenRequest,
     ) -> Vec<u8> {
-        let body = super::request::token_request_body(credentials, request);
+        let body = super::request::token_request_body(credentials, request, REDIRECT_URI);
         format!("{HEAD}content-length: {}\r\n\r\n{body}", body.len()).into_bytes()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::notary_host;
+    use super::{
+        notary_host,
+        redirect_uri,
+    };
+
+    /// The registered callback URL and nothing that merely resembles it.
+    #[test]
+    fn a_redirect_uri_is_the_callback_path_under_a_canonical_origin() {
+        for ok in [
+            "https://bridge.example/auth/callback",
+            "https://bridge.example:8443/auth/callback",
+            "http://localhost:8722/auth/callback",
+            "http://127.0.0.1:8722/auth/callback",
+        ] {
+            assert_eq!(redirect_uri(ok, "/auth/callback"), Some(ok), "{ok}");
+        }
+        for bad in [
+            "https://bridge.example/auth/callback/",
+            "https://bridge.example/other",
+            "https://bridge.example",
+            "https://bridge.example:443/auth/callback",
+            "https://BRIDGE.example/auth/callback",
+            "https://bridge.example/auth/callback?x=1",
+            "https://bridge.example/auth/callback#x",
+            "https://user@bridge.example/auth/callback",
+            "http://bridge.example/auth/callback",
+            "http://[::1]:8722/auth/callback",
+            "/auth/callback",
+            "",
+        ] {
+            assert_eq!(redirect_uri(bad, "/auth/callback"), None, "{bad}");
+        }
+        assert_eq!(
+            redirect_uri("https://bridge.example/auth/callback", "/oauth/return"),
+            None
+        );
+    }
+
     #[test]
     fn plaintext_notary_is_limited_to_explicit_loopback_hosts() {
         for (origin, host) in [

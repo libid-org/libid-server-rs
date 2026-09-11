@@ -145,8 +145,8 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
 /// the projection is of a deployment, so a value that is not part of one has
 /// no field to arrive in.
 pub struct CeremonyConfig<'a> {
-    /// Where providers redirect back to, which the browser must match.
-    pub redirect_uri: &'a str,
+    /// The path providers redirect back to, under the bridge's origin.
+    pub callback_path: &'a str,
     /// The CCDP Distribution this deployment selects.
     pub ccdp_origin: &'a str,
     /// The enabled platforms, already parsed and checked.
@@ -155,8 +155,8 @@ pub struct CeremonyConfig<'a> {
 
 impl CeremonyConfig<'_> {
     fn record(&self) -> Value {
-        let (redirect_uri, ccdp_origin, platforms) =
-            (self.redirect_uri, self.ccdp_origin, self.platforms);
+        let (callback_path, ccdp_origin, platforms) =
+            (self.callback_path, self.ccdp_origin, self.platforms);
         let mut by_id = Map::new();
         for p in platforms {
             by_id.insert(
@@ -168,7 +168,7 @@ impl CeremonyConfig<'_> {
             );
         }
         json!({
-            "redirectUri": redirect_uri,
+            "callbackPath": callback_path,
             "ccdpOrigin": ccdp_origin,
             "platforms": Value::Object(by_id),
         })

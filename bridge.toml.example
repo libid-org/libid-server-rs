@@ -13,12 +13,8 @@
 host = "127.0.0.1"
 port = 8722
 
-# This bridge's public origin: scheme, host and, if it is not the default,
-# port. HTTPS unless the host is loopback. The registered OAuth callback URL is
-# base_url + callback_path.
-base_url = "https://bridge.example"
-
-# The path providers redirect back to.
+# The path providers redirect back to. The registered OAuth callback URL is
+# this bridge's public origin followed by it.
 callback_path = "/auth/callback"
 
 # The port of the notary's MPC-TLS wire listener. The notary itself is named

@@ -26,8 +26,4 @@ pub struct OAuthCredentials {
     /// in a value, so the boundary the disclosure layout anchors on is always
     /// the one this service wrote.
     pub client_secret: String,
-    /// The registered redirect URI, byte for byte as GitHub has it. The
-    /// browser sends the same bytes in the token request, and GitHub refuses
-    /// an exchange whose two spellings differ.
-    pub redirect_uri: String,
 }

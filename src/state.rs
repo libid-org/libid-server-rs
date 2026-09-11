@@ -37,6 +37,9 @@ pub struct GithubExchange {
     /// GitHub's confidential client. The secret never leaves this process and
     /// is never revealed in a notarized transcript.
     pub(crate) credentials: OAuthCredentials,
+    /// The path providers redirect back to. A request's `redirectUri` is the
+    /// bridge's origin followed by exactly this.
+    pub(crate) callback_path: String,
     /// Dials the notary each token request names, on the wire port; refuses
     /// private and internal addresses.
     pub(crate) egress: crate::routes::github_token::NotaryEgress,
@@ -73,12 +76,6 @@ pub struct AppState {
     /// `watch::Receiver`, and the handler's `.clone()` of two cheap fields
     /// becomes a `borrow().clone()` -- the route does not otherwise change.
     pub(crate) callback: crate::artifact::CallbackDocument,
-    /// Whether this bridge's own origin is one of the admitted origins.
-    ///
-    /// Decides one thing: whether a same-origin `GET` carrying no `Origin` may
-    /// read the configuration. A deployment that does not admit itself has no
-    /// same-origin application to admit, so the exception is closed for it.
-    pub(crate) admits_same_origin_config: bool,
     /// The effective admission set: `allowedAppOrigins ∪ {ccdpOrigin}`.
     ///
     /// Read by the configuration route and inserted into the callback

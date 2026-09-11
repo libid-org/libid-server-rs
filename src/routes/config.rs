@@ -21,7 +21,6 @@ use axum::{
     http::{
         header,
         HeaderMap,
-        HeaderName,
         HeaderValue,
         StatusCode,
     },
@@ -35,64 +34,26 @@ use serde_json::json;
 
 use crate::state::AppState;
 
-/// Fetch metadata naming where a request came from. No `http` constant exists
-/// for it, and it is the one header besides `Origin` that may admit a caller.
-static SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
+/// What `Vary` names, on every response this route writes: `Origin` decides
+/// the body, on refusals too.
+const VARY_ON: &str = "origin";
 
-/// What `Vary` names, on every response this route writes.
+/// The origin this request may read the configuration from, or `None`.
 ///
-/// Two headers decide the body, so both have to be named or a shared cache can
-/// answer one caller with another's outcome. On refusals too: `no-store` should
-/// already stop that, and a cache that ignores it must not get the chance to
-/// replay a `403` to an origin this deployment admits.
-const VARY_ON: &str = "origin, sec-fetch-site";
-
-/// How a caller was admitted, which decides whether the answer carries CORS.
-enum Admitted {
-    /// A cross-origin read from this exact admitted origin, which is echoed.
-    ///
-    /// Carried as the header value that arrived, not as a `String`: it is
-    /// going straight back out as a header, and re-parsing a value that was
-    /// already one would add an error branch nothing can reach.
-    Origin(HeaderValue),
-    /// A same-origin read, which needs no CORS header at all.
-    SameOrigin,
-}
-
-/// Whether this request may read the configuration, and on what grounds.
-///
-/// `Origin` decides whenever it is present. Only its absence reaches Fetch
-/// metadata, and only `same-origin` is enough there -- `same-site`,
-/// `cross-site`, `none` and a missing header are all refusals, because a
-/// deployment cannot tell a sibling subdomain from itself without it. Neither
-/// `Referer` nor the request host is consulted: both are shaped by the caller,
-/// and this function does not read them.
-impl Admitted {
-    fn of(state: &AppState, headers: &HeaderMap) -> Option<Self> {
-        let admitted = |o: &str| state.allowed_origins.iter().any(|a| a == o);
-
-        match crate::routes::Origins::of(headers) {
-            // Present and exact, or refused. `null`, a malformed value and an
-            // unlisted one all land here and all fail.
-            crate::routes::Origins::One(origin) => {
-                origin.to_str().ok().filter(|o| admitted(o))?;
-                return Some(Admitted::Origin(origin.clone()));
-            }
-            crate::routes::Origins::Several => return None,
-            crate::routes::Origins::Absent => {}
+/// Exactly one `Origin`, matching an admitted origin exactly. `null`, a
+/// malformed value, an unlisted one, two headers and none are all refused.
+/// Neither `Referer` nor the request host is consulted.
+fn admitted_origin(state: &AppState, headers: &HeaderMap) -> Option<HeaderValue> {
+    match crate::routes::Origins::of(headers) {
+        crate::routes::Origins::One(origin) => {
+            let value = origin.to_str().ok()?;
+            state
+                .allowed_origins
+                .iter()
+                .any(|a| a == value)
+                .then(|| origin.clone())
         }
-
-        // No `Origin` at all. A top-level navigation and a same-origin fetch both
-        // look like this, so the metadata has to say which -- and the deployment
-        // has to have admitted its own origin, or there is no same-origin
-        // application to admit.
-        let mut sites = headers.get_all(&SEC_FETCH_SITE).iter();
-        match (sites.next(), sites.next()) {
-            (Some(site), None) if site.as_bytes() == b"same-origin" => state
-                .admits_same_origin_config
-                .then_some(Admitted::SameOrigin),
-            _ => None,
-        }
+        crate::routes::Origins::Several | crate::routes::Origins::Absent => None,
     }
 }
 
@@ -105,7 +66,7 @@ pub(crate) async fn config(
     // Admission decides before anything else looks at the request. A caller
     // that is not admitted learns that it is not admitted, and nothing about
     // whether the rest of its request would have been acceptable.
-    let Some(admitted) = Admitted::of(&state, &headers) else {
+    let Some(origin) = admitted_origin(&state, &headers) else {
         return refuse(
             StatusCode::FORBIDDEN,
             "this configuration is readable only from an admitted origin",
@@ -130,13 +91,9 @@ pub(crate) async fn config(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    // The exact origin that asked, never `*` and never a list: the record is
-    // not public to the web, only to the applications this deployment admits.
-    // No credentials are permitted with it. A same-origin read needs none of
-    // this -- a header granting an origin access to itself says nothing.
-    if let Admitted::Origin(origin) = admitted {
-        out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
-    }
+    // The exact origin that asked, never `*` and never a list. No credentials
+    // are permitted with it.
+    out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
 
     (StatusCode::OK, out, state.ceremony_config.clone()).into_response()
 }

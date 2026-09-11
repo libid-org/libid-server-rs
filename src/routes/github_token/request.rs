@@ -1,9 +1,8 @@
 //! The request this service sends, and the one endpoint it may send it to.
 //!
-//! Everything here is fixed at build time or derived from the credentials: the
-//! endpoint is a constant, the field order is the profile's, and the only part
-//! that varies per ceremony is the code and the verifier the caller supplied.
-//! Nothing a caller sends decides where this goes.
+//! The endpoint is a constant and the field order is the profile's; the code,
+//! the verifier and the redirect URI are the caller's. Nothing a caller sends
+//! decides where this goes.
 
 use axum::http::header;
 use libid_ceremony::token_exchange::TokenRequest;
@@ -84,11 +83,12 @@ pub(crate) fn force_token_endpoint() {
 pub(super) fn token_request_body(
     creds: &OAuthCredentials,
     request: &TokenRequest,
+    redirect_uri: &str,
 ) -> String {
     url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", &creds.client_id)
         .append_pair("code", &request.code)
-        .append_pair("redirect_uri", &creds.redirect_uri)
+        .append_pair("redirect_uri", redirect_uri)
         .append_pair("code_verifier", &request.code_verifier)
         .append_pair(SECRET_FIELD, &creds.client_secret)
         .finish()
@@ -107,12 +107,11 @@ pub(super) fn token_request_body(
 ///
 /// Total, and not a `Result`: the URI is a constant parsed once, the host is
 /// that URI's own authority, every header name and value is a literal, and the
-/// body is bytes. Nothing here comes from the request, so the builder has
-/// nothing to reject -- and a `Result` would be an error branch no input can
-/// reach, tested by nothing, that a reader has to rule out by hand.
+/// body is bytes, so the builder has nothing to reject.
 pub(super) fn token_http_request(
     creds: &OAuthCredentials,
     request: &TokenRequest,
+    redirect_uri: &str,
 ) -> hyper::Request<http_body_util::Full<bytes::Bytes>> {
     let (uri, host) = &*TOKEN_ENDPOINT;
 
@@ -127,7 +126,7 @@ pub(super) fn token_http_request(
         // complete.
         .header(header::CONNECTION, "close")
         .body(http_body_util::Full::new(bytes::Bytes::from(
-            token_request_body(creds, request),
+            token_request_body(creds, request, redirect_uri),
         )))
         .expect("every part of this request is a constant or bytes")
 }
@@ -142,6 +141,7 @@ mod tests {
         credentials,
         request,
         sent,
+        REDIRECT_URI,
     };
 
     /// The property the whole design rests on: everything that proves this
@@ -191,7 +191,7 @@ mod tests {
     fn a_secret_carrying_form_delimiters_cannot_forge_a_field() {
         let secret = "sk&client_secret=forged&scope=admin";
         let credentials = credentials(secret);
-        let body = token_request_body(&credentials, &request());
+        let body = token_request_body(&credentials, &request(), REDIRECT_URI);
 
         let pairs: Vec<_> = url::form_urlencoded::parse(body.as_bytes()).collect();
         assert_eq!(pairs.len(), 5, "five fields, whatever the secret contains");
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn the_request_names_the_host_the_session_authenticates() {
         let credentials = credentials("ghs_secret");
-        let req = token_http_request(&credentials, &request());
+        let req = token_http_request(&credentials, &request(), REDIRECT_URI);
 
         assert_eq!(req.method(), "POST");
         assert_eq!(req.uri(), TOKEN_URL);

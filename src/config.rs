@@ -36,13 +36,6 @@ pub struct Config {
     #[arg(long, env = "PORT", default_value = "8722")]
     pub port: u16,
 
-    /// This bridge's public origin: scheme, host and, if it is not the
-    /// default, port. No path, query, fragment or credentials. HTTPS unless
-    /// the host is loopback. The registered OAuth callback URL is
-    /// `{BASE_URL}{CALLBACK_PATH}`.
-    #[arg(long, env = "BASE_URL", default_value = "http://127.0.0.1:8722")]
-    pub base_url: String,
-
     /// The port of the notary's MPC-TLS wire listener. Each token request
     /// names the notary; this bridge dials that host on this port.
     #[arg(long, env = "NOTARY_WIRE_PORT", default_value_t = 7047)]
@@ -54,8 +47,8 @@ pub struct Config {
     #[arg(long, env = "ALLOWED_APP_ORIGINS", default_value = "")]
     pub allowed_app_origins: String,
 
-    /// The path the providers redirect back to. Every enabled platform
-    /// registers this exact URL.
+    /// The path the providers redirect back to. The registered OAuth callback
+    /// URL is this bridge's public origin followed by this path.
     #[arg(long, env = "CALLBACK_PATH", default_value = "/auth/callback")]
     pub callback_path: String,
 
@@ -100,8 +93,6 @@ pub struct FileConfig {
     pub host: Option<String>,
     /// [`Config::port`].
     pub port: Option<u16>,
-    /// [`Config::base_url`].
-    pub base_url: Option<String>,
     /// [`Config::notary_wire_port`].
     pub notary_wire_port: Option<u16>,
     /// [`Config::allowed_app_origins`], as a list.
@@ -171,9 +162,6 @@ impl Config {
         if defaulted(&matches, "port") {
             cfg.port = file.port.unwrap_or(cfg.port);
         }
-        if defaulted(&matches, "base_url") {
-            cfg.base_url = file.base_url.unwrap_or(cfg.base_url);
-        }
         if defaulted(&matches, "notary_wire_port") {
             cfg.notary_wire_port = file.notary_wire_port.unwrap_or(cfg.notary_wire_port);
         }
@@ -209,7 +197,6 @@ impl std::fmt::Debug for Config {
         f.debug_struct("Config")
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("base_url", &self.base_url)
             .field("notary_wire_port", &self.notary_wire_port)
             .field("allowed_app_origins", &self.allowed_app_origins)
             .field("callback_path", &self.callback_path)
@@ -248,7 +235,7 @@ mod file_tests {
         let cfg = resolved(
             r#"
             port = 9110
-            base_url = "https://bridge.example"
+            callback_path = "/oauth/return"
             allowed_app_origins = ["https://app.example", "https://wallet.example"]
             gh_oauth_client_secret = "ghs_from_the_file"
 
@@ -262,7 +249,7 @@ mod file_tests {
         .expect("a file this deployment can read");
 
         assert_eq!(cfg.port, 9110);
-        assert_eq!(cfg.base_url, "https://bridge.example");
+        assert_eq!(cfg.callback_path, "/oauth/return");
         assert_eq!(
             cfg.allowed_app_origins,
             "https://app.example,https://wallet.example"

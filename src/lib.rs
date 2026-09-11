@@ -44,21 +44,7 @@ use url::Url;
 /// It holds no key material beyond GitHub's client secret, and signs nothing:
 /// the notary signs, and this service carries what it said.
 pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
-    if cfg.base_url.is_empty() {
-        return Err(Error::Config {
-            detail: "BASE_URL must be set \u{2014} it is this bridge's own origin, \
-                     which every registered redirect URI is built on"
-                .into(),
-        });
-    }
-    let server_origin = server_origin(&cfg.base_url)?;
-
     let callback_path = callback_path(&cfg.callback_path)?;
-    // One string, three uses: the route the provider returns to, the bytes the
-    // notarized token request sends, and the `redirectUri` the public
-    // configuration publishes. Deriving all three from one place is what stops
-    // them drifting into a `redirect_uri_mismatch` nobody can see.
-    let redirect_uri = format!("{server_origin}{callback_path}");
 
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
@@ -97,8 +83,8 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                 credentials: oauth::OAuthCredentials {
                     client_id: profile.client_id.clone(),
                     client_secret: secret.to_owned(),
-                    redirect_uri: redirect_uri.clone(),
                 },
+                callback_path: callback_path.clone(),
                 egress: routes::github_token::NotaryEgress::new(cfg.notary_wire_port),
                 ccdp_origin: ccdp_origin.clone(),
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
@@ -122,7 +108,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 
     Ok(Arc::new(AppState {
         ceremony_config: deployment::CeremonyConfig {
-            redirect_uri: &redirect_uri,
+            callback_path: &callback_path,
             ccdp_origin: &ccdp_origin,
             platforms: &platforms,
         }
@@ -132,7 +118,6 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             &ccdp_origin,
             &allowed_origins,
         )?,
-        admits_same_origin_config: allowed_origins.iter().any(|o| o == &server_origin),
         allowed_origins,
         callback_path,
         github,
@@ -282,21 +267,6 @@ fn allowed_app_origins(list: &str) -> Result<Vec<String>> {
         });
     }
     Ok(out)
-}
-
-/// The origin this bridge answers on, exactly as a browser spells it.
-///
-/// Every platform registers a `redirect_uri` built on this string, and a
-/// provider refuses an exchange whose two spellings differ -- at runtime, on
-/// someone's ceremony, which is what parsing it here prevents.
-/// `Url::origin` does the spelling: it lowercases the host and drops a default
-/// port, both of which browsers do too.
-///
-/// A base URL carrying a path is refused rather than trimmed. The router mounts
-/// at the root, so a path would say this service lives somewhere it does not
-/// serve, and the redirect URI derived from it would be one GitHub never sees.
-fn server_origin(base_url: &str) -> Result<String> {
-    canonical_origin("BASE_URL", base_url)
 }
 
 /// The same reading for every origin this deployment configures: this
@@ -449,7 +419,6 @@ mod tests {
         let mut flags: Vec<(&str, &str)> = vec![
             ("--host", "127.0.0.1"),
             ("--port", "8722"),
-            ("--base-url", "http://127.0.0.1:8722"),
             ("--notary-wire-port", dead_port()),
             ("--callback-path", "/auth/callback"),
             ("--allowed-app-origins", "https://app.example"),
@@ -485,19 +454,6 @@ mod tests {
         cfg
     }
 
-    /// The redirect URI is derived, not configured, and a provider refuses an
-    /// exchange whose two spellings differ. So it has to be exactly the
-    /// configured callback path under the configured base URL — the same
-    /// string the public configuration publishes and the router mounts.
-    #[test]
-    fn the_redirect_uri_is_the_callback_route_under_the_base_url() {
-        let state = build_state(&config(&["--base-url", "https://id.example/"])).unwrap();
-        assert_eq!(
-            state.github.as_ref().unwrap().credentials.redirect_uri,
-            "https://id.example/auth/callback"
-        );
-    }
-
     /// An omitted CCDP origin selects the canonical libID Distribution.
     ///
     /// Asserted in two halves, and deliberately not by parsing an argv without
@@ -520,30 +476,6 @@ mod tests {
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(record["ccdpOrigin"], "https://lib.id");
-    }
-
-    /// Whatever the operator writes, the route compares against what a browser
-    /// sends -- so the two spellings a browser normalises away are normalised
-    /// here rather than becoming a 403 on every call.
-    #[test]
-    fn a_base_url_is_reduced_to_the_origin_a_browser_would_send() {
-        for spelling in [
-            "https://id.example.com",
-            "https://id.example.com/",
-            "https://ID.Example.com",
-            "https://id.example.com:443",
-        ] {
-            assert_eq!(
-                server_origin(spelling).unwrap(),
-                "https://id.example.com",
-                "{spelling}"
-            );
-        }
-        // A non-default port is part of the origin and stays.
-        assert_eq!(
-            server_origin("http://127.0.0.1:8722").unwrap(),
-            "http://127.0.0.1:8722"
-        );
     }
 
     /// The plaintext exception is loopback and only loopback, in each of the
@@ -660,38 +592,6 @@ mod tests {
         }
     }
 
-    /// Anything a browser never sends as `Origin` is refused at startup. Left
-    /// alone, each of these starts cleanly and then refuses every ceremony,
-    /// which is the failure this whole function exists to move earlier.
-    #[test]
-    fn a_base_url_that_is_not_a_bare_origin_stops_the_process() {
-        for spelling in [
-            "https://id.example.com/ceremony",
-            "https://id.example.com?tenant=1",
-            "https://id.example.com#frag",
-            "https://user:pw@id.example.com",
-            "ftp://id.example.com",
-            "not a url",
-        ] {
-            assert!(
-                server_origin(spelling).is_err(),
-                "{spelling} must be refused"
-            );
-        }
-    }
-
-    /// And the redirect URI GitHub has registered is built on the normalised
-    /// form, not on what was typed.
-    #[test]
-    fn the_redirect_uri_is_built_on_the_normalised_origin() {
-        let state =
-            build_state(&config(&["--base-url", "https://ID.example.com:443/"])).unwrap();
-        assert_eq!(
-            state.github.as_ref().unwrap().credentials.redirect_uri,
-            "https://id.example.com/auth/callback"
-        );
-    }
-
     /// Every one of these starts a process that then refuses real ceremonies,
     /// which is the whole reason these run at startup rather than per request.
     #[test]
@@ -749,10 +649,6 @@ mod tests {
             // to the same shape, because all three reach a policy or a
             // comparison with what a browser sent.
             (
-                "a base URL whose host carries a CSP directive separator",
-                vec!["--base-url", "https://a;b.example"],
-            ),
-            (
                 "a CCDP origin whose host carries a CSP directive separator",
                 vec!["--ccdp-origin", "https://a;b.example"],
             ),
@@ -760,10 +656,9 @@ mod tests {
                 "an admitted origin whose host carries a CSP keyword quote",
                 vec!["--allowed-app-origins", "https://a'b.example"],
             ),
-            // The contract singles this list out: "a duplicate or invalid
-            // member is a deployment error rather than something the bridge
-            // normalizes". So each of these is refused with the canonical
-            // spelling named, where `BASE_URL` would be folded.
+            // "A duplicate or invalid member is a deployment error rather than
+            // something the bridge normalizes": each is refused with the
+            // canonical spelling named, where `CCDP_ORIGIN` would be folded.
             (
                 "an admitted origin carrying a trailing slash",
                 vec!["--allowed-app-origins", "https://app.example/"],

@@ -22,10 +22,6 @@ use tower::ServiceExt;
 
 const APP_ORIGIN: &str = "http://localhost:3000";
 const CCDP_ORIGIN: &str = "https://ccdp.example";
-/// What `build_state` must derive from the base URL and the callback path.
-/// Written here as a literal precisely so the derivation has something to be
-/// checked against; the fixture no longer supplies it.
-const REDIRECT_URI: &str = "http://127.0.0.1:8722/auth/callback";
 
 /// A deployment, built the way the binary builds one.
 ///
@@ -59,7 +55,6 @@ fn deployment(overrides: &[&str]) -> Arc<AppState> {
         ("--host", "127.0.0.1"),
         ("--port", "8722"),
         ("--callback-path", "/auth/callback"),
-        ("--base-url", "http://127.0.0.1:8722"),
         (
             "--allowed-app-origins",
             "http://localhost:3000,https://wallet.example",
@@ -150,6 +145,10 @@ async fn post_token(origin: Option<&str>, body: String) -> axum::response::Respo
 /// destination is not dialled unless a deployment has permitted it.
 const NOTARY: &str = "https://127.0.0.1:7048";
 
+/// The registered callback URL a request carries: the fixture's callback path
+/// under a canonical origin.
+const REDIRECT: &str = "https://bridge.example/auth/callback";
+
 /// A request body carrying every field, varying only the two under test.
 ///
 /// One shape, because the tests below are a comparison: they mean something
@@ -158,7 +157,7 @@ const NOTARY: &str = "https://127.0.0.1:7048";
 /// field from one of them and leave the pair asserting nothing.
 fn token_body(code: &str, verifier: &str) -> String {
     format!(
-        r#"{{"code":"{code}","codeVerifier":"{verifier}","notaryAddress":"{NOTARY}"}}"#
+        r#"{{"code":"{code}","codeVerifier":"{verifier}","redirectUri":"{REDIRECT}","notaryAddress":"{NOTARY}"}}"#
     )
 }
 
@@ -187,17 +186,40 @@ async fn github_token_refuses_a_request_with_no_origin() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// The route takes a code and a verifier and nothing else. A body carrying a
-/// `redirectUri`, a `clientId` or an endpoint is refused rather than ignored:
-/// silently dropping them would leave a caller believing it had steered
-/// something.
+/// A body carrying a `clientId` or an endpoint is refused rather than ignored.
 #[tokio::test]
 async fn github_token_refuses_a_body_that_tries_to_steer_the_exchange() {
     let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"https://evil.example/cb"}}"#
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{NOTARY}","clientId":"Iv1.other"}}"#
     );
     let resp = post_token(Some(ORIGIN), body).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// `redirectUri` is the callback path under a canonical origin; anything else
+/// is refused before a session is opened.
+#[tokio::test]
+async fn github_token_refuses_a_redirect_uri_that_is_not_the_registered_callback_url() {
+    for bad in [
+        "https://bridge.example/other",
+        "https://bridge.example/auth/callback/",
+        "https://bridge.example/auth/callback?x=1",
+        "http://bridge.example/auth/callback",
+        "https://user@bridge.example/auth/callback",
+        "/auth/callback",
+        "",
+    ] {
+        let body = format!(
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{bad}","notaryAddress":"{NOTARY}"}}"#
+        );
+        let resp = post_token(Some(ORIGIN), body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad:?}");
+    }
+    let body = format!(
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{NOTARY}"}}"#
+    );
+    let resp = post_token(Some(ORIGIN), body).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "missing");
 }
 
 #[tokio::test]
@@ -390,15 +412,6 @@ async fn config_with(
         .unwrap()
 }
 
-/// A deployment that admits its own origin, which is what opens the
-/// same-origin exception at all. The default fixture deliberately does not.
-fn admits_itself() -> Arc<AppState> {
-    deployment(&[
-        "--allowed-app-origins",
-        "http://127.0.0.1:8722,http://localhost:3000",
-    ])
-}
-
 async fn body_of(resp: axum::response::Response) -> serde_json::Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
@@ -430,9 +443,7 @@ async fn config_refuses_an_absent_or_unlisted_origin() {
     for origin in [
         None,
         Some("https://evil.example"),
-        // A browser sends this for an opaque origin. It is a value, not an
-        // absence, so it fails as an unlisted origin rather than reaching the
-        // same-origin path.
+        // A browser sends this for an opaque origin.
         Some("null"),
         // Near misses. A browser sends none of these for an admitted page.
         Some("http://LOCALHOST:3000"),
@@ -450,95 +461,24 @@ async fn config_refuses_an_absent_or_unlisted_origin() {
     }
 }
 
-/// A same-origin `GET` carries no `Origin`, so Fetch metadata is the only
-/// thing that can distinguish it from a top-level navigation or a cross-site
-/// request. It is admitted, and it gets no allow-origin header -- a header
-/// granting an origin access to itself says nothing.
-#[tokio::test]
-async fn config_admits_a_same_origin_get_when_the_bridge_admits_its_own_origin() {
-    let resp =
-        config_with(admits_itself(), &[("sec-fetch-site", "same-origin")], "").await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(
-        resp.headers().get("access-control-allow-origin").is_none(),
-        "a same-origin read needs no CORS header"
-    );
-}
-
-/// And the exception is closed for a deployment that does not admit itself:
-/// there is no same-origin application to admit. The default fixture's
-/// `--base-url` is deliberately absent from its `--allowed-app-origins`.
-#[tokio::test]
-async fn config_refuses_a_same_origin_get_when_the_bridge_is_not_in_its_own_allowlist() {
-    let resp = config_with(test_state(), &[("sec-fetch-site", "same-origin")], "").await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-/// `same-origin` and nothing else. A missing header is refused too: absent
-/// Fetch metadata is not evidence of anything, and treating it as same-origin
-/// would admit every client that simply does not send it.
-#[tokio::test]
-async fn config_refuses_every_fetch_site_but_same_origin() {
-    for site in [
-        "same-site",
-        "cross-site",
-        "none",
-        "SAME-ORIGIN",
-        " same-origin",
-    ] {
-        let resp = config_with(admits_itself(), &[("sec-fetch-site", site)], "").await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{site:?}");
-    }
-    // No metadata at all.
-    let resp = config_with(admits_itself(), &[], "").await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "missing metadata");
-}
-
-/// Two of either header is not a request a browser sends, and taking the first
+/// Two `Origin` headers is not a request a browser sends, and taking the first
 /// would let a caller choose which one is read.
 #[tokio::test]
-async fn config_refuses_a_header_sent_twice() {
+async fn config_refuses_an_origin_sent_twice() {
     let two_origins = config_with(
-        admits_itself(),
+        test_state(),
         &[("origin", APP_ORIGIN), ("origin", "https://evil.example")],
         "",
     )
     .await;
     assert_eq!(two_origins.status(), StatusCode::FORBIDDEN, "two origins");
-
-    let two_sites = config_with(
-        admits_itself(),
-        &[
-            ("sec-fetch-site", "same-origin"),
-            ("sec-fetch-site", "cross-site"),
-        ],
-        "",
-    )
-    .await;
-    assert_eq!(two_sites.status(), StatusCode::FORBIDDEN, "two fetch sites");
-}
-
-/// An explicit `Origin` always decides, and never falls back to metadata --
-/// otherwise an unlisted page could drop to the same-origin path by sending
-/// `Sec-Fetch-Site: same-origin` alongside its own origin.
-#[tokio::test]
-async fn config_never_falls_back_to_metadata_when_an_origin_is_present() {
-    for origin in ["https://evil.example", "null", "not a url"] {
-        let resp = config_with(
-            admits_itself(),
-            &[("origin", origin), ("sec-fetch-site", "same-origin")],
-            "",
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{origin}");
-    }
 }
 
 /// Neither is an authority input, and the handler does not read them.
 #[tokio::test]
 async fn config_admits_nothing_on_referer_or_host() {
     let resp = config_with(
-        admits_itself(),
+        test_state(),
         &[
             ("referer", "http://127.0.0.1:8722/"),
             ("host", "127.0.0.1:8722"),
@@ -549,25 +489,19 @@ async fn config_admits_nothing_on_referer_or_host() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// Two headers decide the body, so a shared cache must be told both -- on
-/// refusals as well, or a cache that ignores `no-store` could replay a 403 to
-/// an origin this deployment admits.
+/// `Origin` decides the body, so a shared cache is told so -- on refusals as
+/// well, or a cache that ignores `no-store` could replay a 403 to an origin
+/// this deployment admits.
 #[tokio::test]
-async fn config_varies_on_both_admission_headers() {
-    let admitted = config_with(admits_itself(), &[("origin", APP_ORIGIN)], "").await;
+async fn config_varies_on_origin() {
+    let admitted = config_with(test_state(), &[("origin", APP_ORIGIN)], "").await;
     assert_eq!(admitted.status(), StatusCode::OK);
-    assert_eq!(
-        admitted.headers().get("vary").unwrap(),
-        "origin, sec-fetch-site"
-    );
+    assert_eq!(admitted.headers().get("vary").unwrap(), "origin");
 
     let refused =
-        config_with(admits_itself(), &[("origin", "https://evil.example")], "").await;
+        config_with(test_state(), &[("origin", "https://evil.example")], "").await;
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
-        refused.headers().get("vary").unwrap(),
-        "origin, sec-fetch-site"
-    );
+    assert_eq!(refused.headers().get("vary").unwrap(), "origin");
 }
 
 /// The record carries exactly what the contract lists and nothing else.
@@ -583,13 +517,9 @@ async fn config_carries_no_secret_and_no_admitted_origin() {
     let object = body.as_object().unwrap();
     let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["ccdpOrigin", "platforms", "redirectUri"]);
+    assert_eq!(keys, ["callbackPath", "ccdpOrigin", "platforms"]);
     assert_eq!(body["ccdpOrigin"], CCDP_ORIGIN);
-
-    assert_eq!(
-        body["redirectUri"], REDIRECT_URI,
-        "the record publishes the same redirect URI the token request sends"
-    );
+    assert_eq!(body["callbackPath"], "/auth/callback");
     assert_eq!(body["platforms"]["github"]["clientId"], "test-client-id");
     assert_eq!(body["platforms"]["github"]["ceremonyVersions"][0], 1);
 
@@ -843,7 +773,7 @@ async fn github_token_takes_exactly_one_media_type() {
 #[tokio::test]
 async fn github_token_refuses_a_private_notary_and_dials_a_loopback_one() {
     let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"https://10.0.0.1:7048"}}"#
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"https://10.0.0.1:7048"}}"#
     );
     let resp = post_token(Some(ORIGIN), body).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -858,7 +788,7 @@ async fn github_token_refuses_a_private_notary_and_dials_a_loopback_one() {
 async fn github_token_admits_the_localhost_http_exception_and_nothing_like_it() {
     for admitted in ["http://localhost:7048", "http://127.0.0.1:7048"] {
         let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{admitted}"}}"#
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{admitted}"}}"#
         );
         // Past the gate and dialled, on a port nothing listens on: a `502` is
         // the origin being admitted, where a `400` would be it refused.
@@ -871,7 +801,7 @@ async fn github_token_admits_the_localhost_http_exception_and_nothing_like_it() 
         "http://notary.example",
     ] {
         let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{refused}"}}"#
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{refused}"}}"#
         );
         let resp = post_token(Some(ORIGIN), body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{refused}");
@@ -893,7 +823,7 @@ async fn github_token_refuses_an_invalid_notary_origin() {
         "",
     ] {
         let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{bad}"}}"#
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{bad}"}}"#
         );
         let resp = post_token(Some(ORIGIN), body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad:?}");
@@ -905,7 +835,9 @@ async fn github_token_refuses_an_invalid_notary_origin() {
 /// `TokenRequest`.
 #[tokio::test]
 async fn github_token_refuses_a_body_without_a_notary_address() {
-    let body = format!(r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#);
+    let body = format!(
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}"}}"#
+    );
     let resp = post_token(Some(ORIGIN), body).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
