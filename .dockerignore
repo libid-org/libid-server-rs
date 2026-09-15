@@ -2,3 +2,6 @@ target/
 .git/
 .github/
 *.md
+# Local configuration and secrets: the builder stage copies the checkout.
+/bridge.toml
+/.env*

@@ -1,30 +1,29 @@
-# Build stage. git + ca-certificates are needed because the libid-rs and
-# tlsn dependencies are git dependencies; pkg-config/libssl-dev cover any
-# transitive native-TLS probe (the binary itself uses rustls).
+# Build stage.
 FROM rust:1.97-slim-bookworm AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates git pkg-config libssl-dev \
+        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY . .
 RUN cargo build --release --locked
 
-# Runtime stage: slim Debian + CA roots (outbound TLS to GitHub and the
-# platform APIs) + curl for the container healthcheck.
+# Runtime stage. No CA bundle: the trust anchors for retrieving the callback
+# artifact are compiled in (`webpki-root-certs`), and the healthcheck is
+# plaintext loopback. curl serves the healthcheck.
 FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates libssl3 curl \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/libid-server-rs /usr/local/bin/libid-server-rs
 
-# Bind on all interfaces inside the container; everything else comes from
-# the environment (see README for the full table).
+# Where the process listens inside the container. The mounted configuration
+# file carries no bind address: HOST and PORT are the only way to set one.
 ENV HOST=0.0.0.0 \
     PORT=8722
 

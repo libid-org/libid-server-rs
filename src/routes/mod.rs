@@ -1,81 +1,84 @@
-//! HTTP route table and CORS. The full endpoint surface, deliberately tiny:
+//! The OAuth Bridge's route table:
 //!
 //! - `GET  /health`
-//! - `POST /auth/github/challenge`
-//! - `GET  /auth/github/callback`
-//! - `GET  /auth/github/result/{challenge}`
-//! - `GET  /auth/gmail/callback`
+//! - `GET  /api/v1/ceremony/config`
+//! - `GET  /auth/callback`
 //!
-//! X gets NO backend endpoints: its browser flow talks to the notary
-//! directly.
+//! Everything the browser runs is served by the CCDP Distribution at the
+//! configured `ccdpOrigin`. The configuration route admits exactly one
+//! `Origin`, in the effective set `allowedAppOrigins ∪ {ccdpOrigin}`, and
+//! echoes it as the one origin allowed. The callback carries no CORS: it is a
+//! top-level navigation. No other path is served, and no route performs a
+//! token exchange or opens a notary connection.
 
-pub mod callback;
-pub mod challenge;
-pub mod gmail;
-pub mod result;
+pub(crate) mod callback;
+pub(crate) mod config;
 
 use std::sync::Arc;
 
 use axum::{
-    http::HeaderValue,
-    routing::{
-        get,
-        post,
+    http::{
+        header,
+        HeaderName,
+        HeaderValue,
     },
+    routing::get,
     Router,
 };
-use tower_http::cors::CorsLayer;
 
 use crate::state::AppState;
 
-/// Liveness probe.
-async fn health() -> &'static str {
-    "OK"
+/// How many `Origin` headers a request carried. The configuration route
+/// admits exactly one, matching an admitted origin.
+pub(crate) enum Origins<'a> {
+    /// No `Origin`.
+    Absent,
+    /// Exactly one.
+    One(&'a axum::http::HeaderValue),
+    /// More than one; refused.
+    Several,
 }
 
-/// Build the route table (no CORS applied; see [`cors_layer`]).
-pub fn build_router() -> Router<Arc<AppState>> {
+impl<'a> Origins<'a> {
+    /// The `Origin` headers of `headers`.
+    pub(crate) fn of(headers: &'a axum::http::HeaderMap) -> Self {
+        let mut seen = headers.get_all(axum::http::header::ORIGIN).iter();
+        match (seen.next(), seen.next()) {
+            (Some(one), None) => Origins::One(one),
+            (Some(_), Some(_)) => Origins::Several,
+            (None, _) => Origins::Absent,
+        }
+    }
+}
+
+/// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, on every
+/// response this service writes.
+pub(crate) const ON_EVERY_RESPONSE: [(HeaderName, HeaderValue); 2] = [
+    (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+    (
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    ),
+];
+
+/// Liveness probe: `OK`. Not one of the contract's routes; the published
+/// image's `HEALTHCHECK` targets it. It is the one route that accepts a query.
+async fn health() -> impl axum::response::IntoResponse {
+    (ON_EVERY_RESPONSE, "OK")
+}
+
+/// The liveness probe.
+pub(crate) const HEALTH_PATH: &str = "/health";
+/// The registered OAuth callback: the callback document.
+pub const CALLBACK_PATH: &str = "/auth/callback";
+/// The public ceremony configuration.
+pub(crate) const CONFIG_PATH: &str = "/api/v1/ceremony/config";
+
+/// The route table: the same three routes for every deployment.
+pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/health", get(health))
-        .route("/auth/github/challenge", post(challenge::challenge_github))
-        .route("/auth/github/callback", get(callback::callback_github))
-        .route(
-            "/auth/github/result/{challenge}",
-            get(result::result_github),
-        )
-        .route("/auth/gmail/callback", get(gmail::gmail_callback))
-}
-
-/// CORS layer from a list of origin patterns (supports `*.suffix` and
-/// `prefix*` wildcards).
-pub fn cors_layer(allowed_origins: Vec<String>) -> CorsLayer {
-    CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::predicate(
-            move |origin: &HeaderValue, _req: &axum::http::request::Parts| {
-                let origin_str = match origin.to_str() {
-                    Ok(s) => s,
-                    Err(_) => return false,
-                };
-                allowed_origins.iter().any(|pattern| {
-                    if pattern.contains('*') {
-                        if let Some(suffix) = pattern.strip_prefix("*.") {
-                            origin_str.ends_with(&format!(".{suffix}"))
-                                || origin_str == suffix
-                        } else if let Some(prefix) = pattern.strip_suffix('*') {
-                            origin_str.starts_with(prefix)
-                        } else {
-                            false
-                        }
-                    } else {
-                        origin_str == pattern
-                    }
-                })
-            },
-        ))
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::OPTIONS,
-        ])
-        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::ACCEPT])
+        .route(HEALTH_PATH, get(health))
+        .route(CONFIG_PATH, get(config::config))
+        .route(CALLBACK_PATH, get(callback::callback))
+        .with_state(state)
 }
