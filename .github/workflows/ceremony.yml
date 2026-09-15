@@ -1,10 +1,11 @@
 name: Live ceremony
 
 # The suite behind `--features live-ceremony`: real MPC-TLS sessions through
-# an in-process notary against github.com and api.x.com. Pull requests run
-# the refusal rungs; the scheduled and dispatched runs add the
-# session-budget rung and the GitHub browser rung; a dispatch with the `x`
-# input runs the X authorization rung. Not a required check.
+# an in-process notary against github.com and api.x.com, the bridge under
+# test publishing the configuration. Pull requests run the refusal rungs;
+# the scheduled and dispatched runs add the GitHub authorization rung; a
+# dispatch with the `x` input runs the X authorization rung. Not a required
+# check.
 
 on:
   pull_request:
@@ -30,7 +31,8 @@ env:
 jobs:
   # Whether the secrets are available to this run: they are not on a pull
   # request from a fork, and not in a repository without them. `go` is the
-  # GitHub App's secret; `x` is the X app and account.
+  # GitHub App's client secret, the credential the bridge publishes; `x` is
+  # the X app and account.
   gate:
     name: Secrets available
     runs-on: ubuntu-latest
@@ -65,13 +67,13 @@ jobs:
         with:
           key: live-ceremony
 
-      - name: Refused code, refused credentials, refused bearer
+      - name: Refused code, refused credential, refused bearers
         env:
           GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
           GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
           LIBID_TEST_PUBLIC_ORIGIN: ${{ vars.LIBID_TEST_PUBLIC_ORIGIN }}
         run: |
-          cargo test --features live-ceremony --test ceremony -- --test-threads=1 --skip never_speaks --skip a_real_authorization --skip x_authorization
+          cargo test --features live-ceremony --test ceremony -- --test-threads=1 --skip github_authorization --skip x_authorization
 
   full:
     name: Every rung
