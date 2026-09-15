@@ -1,0 +1,134 @@
+name: Live ceremony
+
+# The suite behind `--features live-ceremony`: real MPC-TLS sessions through
+# an in-process notary against github.com and api.x.com, the bridge under
+# test publishing the configuration. Pull requests run the refusal rungs;
+# the scheduled and dispatched runs add the GitHub authorization rung; a
+# dispatch with the `x` input runs the X authorization rung. Not a required
+# check.
+
+on:
+  pull_request:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      x:
+        description: "Run the X rung: a real X sign-in and the two notarized sessions"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ceremony-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: "-D warnings"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_VERSION: 1.97.1
+
+jobs:
+  # Whether the secrets are available to this run: they are not on a pull
+  # request from a fork, and not in a repository without them. `go` is the
+  # GitHub App's client secret, the credential the bridge publishes; `x` is
+  # the X app and account.
+  gate:
+    name: Secrets available
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+      x: ${{ steps.check.outputs.x }}
+    steps:
+      - id: check
+        env:
+          SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+          X_APP: ${{ secrets.X_OAUTH_CLIENT_ID }}
+          X_PASSWORD: ${{ secrets.X_TEST_ALICE_PASSWORD }}
+        run: |
+          if [ -n "$SECRET" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else echo "go=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "$X_APP" ] && [ -n "$X_PASSWORD" ]; then echo "x=true" >> "$GITHUB_OUTPUT"; else echo "x=false" >> "$GITHUB_OUTPUT"; fi
+
+  refusals:
+    name: Refusal rungs
+    needs: gate
+    if: needs.gate.outputs.go == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: live-ceremony
+
+      - name: Refused code, refused credential, refused bearers
+        env:
+          GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
+          GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+          LIBID_TEST_PUBLIC_ORIGIN: ${{ vars.LIBID_TEST_PUBLIC_ORIGIN }}
+        run: |
+          cargo test --features live-ceremony --test ceremony -- --test-threads=1 --skip github_authorization --skip x_authorization
+
+  full:
+    name: Every rung
+    needs: gate
+    if: needs.gate.outputs.go == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: live-ceremony
+
+      - name: Every rung, one at a time
+        env:
+          GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
+          GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+          LIBID_TEST_PUBLIC_ORIGIN: ${{ vars.LIBID_TEST_PUBLIC_ORIGIN }}
+          GH_TEST_ALICE_USERNAME: ${{ secrets.GH_TEST_ALICE_USERNAME }}
+          GH_TEST_ALICE_PASSWORD: ${{ secrets.GH_TEST_ALICE_PASSWORD }}
+          GH_TEST_ALICE_TOTP_SECRET: ${{ secrets.GH_TEST_ALICE_TOTP_SECRET }}
+          CHROME: /usr/bin/google-chrome
+        run: |
+          cargo test --features live-ceremony --test ceremony -- --test-threads=1 --skip x_authorization
+
+  x:
+    name: X rung
+    needs: gate
+    if: needs.gate.outputs.x == 'true' && github.event_name == 'workflow_dispatch' && inputs.x
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: live-ceremony
+
+      - name: A real X authorization and its two notarized sessions
+        env:
+          X_OAUTH_CLIENT_ID: ${{ secrets.X_OAUTH_CLIENT_ID }}
+          LIBID_TEST_X_REDIRECT_URI: ${{ vars.LIBID_TEST_X_REDIRECT_URI }}
+          X_TEST_ALICE_USERNAME: ${{ secrets.X_TEST_ALICE_USERNAME }}
+          X_TEST_ALICE_PASSWORD: ${{ secrets.X_TEST_ALICE_PASSWORD }}
+          X_TEST_ALICE_EMAIL: ${{ secrets.X_TEST_ALICE_EMAIL }}
+          X_TEST_ALICE_COOKIES: ${{ secrets.X_TEST_ALICE_COOKIES }}
+          CHROME: /usr/bin/google-chrome
+        run: |
+          cargo test --features live-ceremony --test ceremony -- --test-threads=1 --nocapture x_authorization

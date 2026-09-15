@@ -208,6 +208,70 @@ Images are published on every GitHub release as
 `HOST=0.0.0.0` and `PORT=8722` and carries a `/health` healthcheck on that
 port; `-e PORT=` moves both.
 
+## Testing
+
+`cargo test` is hermetic: it opens no socket outside the process and needs no
+credentials.
+
+The ceremonies the published configuration starts are covered by a second
+suite behind a feature:
+
+```sh
+cargo test --features live-ceremony --test ceremony
+```
+
+It runs the real binary on a configuration file, reads `/config` from it as
+an application would, and runs the notarized sessions of the GitHub and X
+ceremonies with a prover of its own through an in-process notary built from
+`libid-tlsn`; both records of each ceremony are checked against the rules the
+Platform Verifier applies on chain. The suite reads its settings from the
+environment, or from a gitignored `.env.test` where an exported variable
+wins; a missing variable fails the run.
+
+| Variable | Rungs | Meaning |
+|---|---|---|
+| `GH_OAUTH_CLIENT_ID`, `GH_OAUTH_CLIENT_SECRET` | GitHub | The OAuth App. The bridge under test is configured with both and publishes the secret as `clientCredential`; the suite reads them back from `/config` and sends them in the token request. |
+| `LIBID_TEST_PUBLIC_ORIGIN` | GitHub | The bridge origin the App's callback URL is registered under; the suite derives `/auth/callback` from it as the application would. |
+| `GH_TEST_ALICE_USERNAME`, `GH_TEST_ALICE_PASSWORD` | GitHub authorization | The test account. |
+| `GH_TEST_ALICE_TOTP_SECRET` | GitHub authorization | The base32 key of the account's authenticator app; the browser answers the TOTP prompt with it. An account without one is asked to verify the device by mail, which a headless run cannot answer. |
+| `BROWSER_HEAD=1` | authorization | A visible Chrome. |
+| `CHROME` | authorization | The Chrome binary, when it is not on the `PATH`. |
+
+Three GitHub rungs need no account: a refused code and a refused credential
+each fail the token session with GitHub's own answer, past a real session to
+`github.com`; a bearer GitHub did not issue fails the identity session. The
+fourth signs in as the test account in Chrome, authorizes the App, and runs
+the token session with the published credential and the identity session,
+checking the bearer, both records and their signatures. A run that stops on a
+page it does not handle prints that page's URL and text.
+
+Two rungs run the X ceremony, in which the bridge takes no part. One needs
+no account: an identity read with a bearer X did not issue fails with X's
+own answer, past a real session to `api.x.com`. The other signs in as the X
+test account in Chrome and authorizes the app, then runs the two sessions
+the same way. It reads its own variables:
+
+| Variable | Meaning |
+|---|---|
+| `X_OAUTH_CLIENT_ID` | The X app, a public PKCE client. |
+| `LIBID_TEST_X_REDIRECT_URI` | The redirect URI registered on that app, byte for byte. |
+| `X_TEST_ALICE_USERNAME`, `X_TEST_ALICE_PASSWORD` | The X test account. |
+| `X_TEST_ALICE_EMAIL` | Its e-mail address, typed when X asks for it on a sign-in it examines. |
+| `X_TEST_ALICE_COOKIES` | Optional: a saved session, which the rung restores instead of signing in. The value is what the export prints. |
+| `BROWSER_TRACE` | Optional: a directory; the driver writes a numbered screenshot and a dump of the page's controls and text into it at each step. |
+
+The export signs in once in a visible Chrome, where a person may complete
+whatever X asks of a new sign-in, and prints the value:
+
+```sh
+BROWSER_HEAD=1 cargo test --features live-ceremony --test ceremony -- --ignored --nocapture a_fresh_x_session
+```
+
+In CI (`ceremony.yml`) pull requests run the rungs that need no account; the
+scheduled and dispatched runs add the GitHub authorization, one rung at a
+time. The X authorization runs only on a manual dispatch with the `x` input
+set. Each job is skipped where its secrets are absent.
+
 ## Building from source
 
 ```sh

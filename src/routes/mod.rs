@@ -72,7 +72,7 @@ pub(crate) const HEALTH_PATH: &str = "/health";
 /// The registered OAuth callback: the callback document.
 pub const CALLBACK_PATH: &str = "/auth/callback";
 /// The public ceremony configuration.
-pub(crate) const CONFIG_PATH: &str = "/api/v1/ceremony/config";
+pub const CONFIG_PATH: &str = "/api/v1/ceremony/config";
 
 /// The route table: the same three routes for every deployment.
 pub fn build_router(state: Arc<AppState>) -> Router {
